@@ -1,0 +1,2 @@
+org.elasticsearch.eslib.diskbbq.PaimonDiskBBQVectorsFormat
+org.elasticsearch.eslib.diskbbq.es94.ES940DiskBBQVectorsFormat

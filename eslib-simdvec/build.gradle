@@ -1,0 +1,19 @@
+def luceneProfile = findProperty('lucene') ?: '9'
+
+ext {
+    if (luceneProfile == '10') {
+        luceneVersionOverride = '10.4.0'   // match ES 9.4.0 (lucene-core 10.4.0)
+    } else {
+        luceneVersionOverride = '9.12.0'
+    }
+}
+
+dependencies {
+    implementation "org.apache.lucene:lucene-core:${luceneVersionOverride}"
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+}
+
+// src/main21 is intentionally not part of the standalone artifact yet. Those sources still depend
+// on Elasticsearch-internal nativeaccess/simdvec classes and JDK preview APIs, so enabling them
+// makes the Lucene 10 profile uncompilable. The regular source set provides the scalar fallback
+// for both profiles until the JDK 21 implementation is ported with standalone dependencies.

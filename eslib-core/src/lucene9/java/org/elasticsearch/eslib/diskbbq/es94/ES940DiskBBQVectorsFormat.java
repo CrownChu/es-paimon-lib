@@ -1,0 +1,498 @@
+/*
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
+ */
+
+package org.elasticsearch.eslib.diskbbq.es94;
+
+import org.apache.lucene.codecs.KnnVectorsReader;
+import org.apache.lucene.codecs.KnnVectorsWriter;
+import org.apache.lucene.codecs.hnsw.FlatVectorScorerUtil;
+import org.apache.lucene.codecs.hnsw.FlatVectorsFormat;
+import org.apache.lucene.codecs.KnnVectorsFormat;
+import org.apache.lucene.codecs.lucene99.Lucene99FlatVectorsFormat;
+import org.apache.lucene.index.SegmentReadState;
+import org.apache.lucene.index.SegmentWriteState;
+import org.apache.lucene.search.TaskExecutor;
+import org.elasticsearch.eslib.diskbbq.OptimizedScalarQuantizer;
+import org.elasticsearch.eslib.compat.ESVectorUtil;
+
+import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+
+/**
+ * Standalone-lib port of Elasticsearch's {@code ES940DiskBBQVectorsFormat}.
+ *
+ * <p>The disk byte layout (centroid / cluster / meta extensions, {@link QuantEncoding}, versions,
+ * cluster parameters) is preserved verbatim from the native ES940 format so that the segments written
+ * by {@link ES940DiskBBQVectorsWriter} are byte-compatible with the native ES940 reader.
+ *
+ * <p>Deviations from the native format (do NOT affect written segment bytes):
+ * <ul>
+ *   <li>The raw-vector storage is fixed to a plain {@link Lucene99FlatVectorsFormat} (FLOAT32, no
+ *       DirectIO, no BFloat16). The native format selects between es93 DirectIO/BFloat16 flat formats;
+ *       those only change the raw-vector file's flat codec, which is recorded by name in the meta and
+ *       resolved on read.</li>
+ *   <li>{@link #fieldsReader} returns the Lucene 9 standalone reader, which supports both merge-time
+ *       raw-vector access and local IVF search. The paimon-store mount still uses its own Lucene 10
+ *       reader with OSS prefetching.</li>
+ * </ul>
+ */
+public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
+
+    // Renamed from native "ES940DiskBBQVectorsFormat" so the segment codec name resolves to the
+    // paimon-store ES940 reader (with OSS bulk-prefetch + mount visit-cap), not the native reader.
+    // Must stay byte-identical to native ES940 otherwise; only the SPI/codec name string differs.
+    public static final String NAME = "PaimonES940DiskBBQVectorsFormat";
+    // centroid ordinals -> centroid values, offsets
+    public static final String CENTROID_EXTENSION = "cenivf";
+    // offsets contained in cen_ivf, [vector ordinals, actually just docIds](long varint), quantized vectors
+    public static final String CLUSTER_EXTENSION = "clivf";
+    public static final String IVF_META_EXTENSION = "mivf";
+
+    public static final int VERSION_START = 1;
+    public static final int VERSION_DIRECT_IO = VERSION_START;
+    public static final int VERSION_PACKED_INT4 = 2;
+    public static final int VERSION_CURRENT = VERSION_PACKED_INT4;
+    public static final float DYNAMIC_VISIT_RATIO = 0.0f;
+
+    private static final FlatVectorsFormat float32VectorFormat = new Lucene99FlatVectorsFormat(
+        FlatVectorScorerUtil.getLucene99FlatVectorsScorer()
+    );
+
+    public static final int DEFAULT_VECTORS_PER_CLUSTER = 384;
+    private static final int DEFAULT_FLAT_VECTOR_THRESHOLD_MULTIPLIER = 3;
+
+    /**
+     * Returns the default flat index threshold for the given cluster size.
+     * @param configuredClusterSize the configured cluster size
+     * @return the default flat index threshold
+     */
+    public static int defaultFlatThreshold(int configuredClusterSize) {
+        return configuredClusterSize * DEFAULT_FLAT_VECTOR_THRESHOLD_MULTIPLIER;
+    }
+
+    public static final int MIN_VECTORS_PER_CLUSTER = 64;
+    public static final int MAX_VECTORS_PER_CLUSTER = 1 << 16; // 65536
+    public static final int DEFAULT_CENTROIDS_PER_PARENT_CLUSTER = 16;
+    public static final int MIN_CENTROIDS_PER_PARENT_CLUSTER = 2;
+    public static final int MAX_CENTROIDS_PER_PARENT_CLUSTER = DEFAULT_VECTORS_PER_CLUSTER; // 384
+    public static final int DEFAULT_PRECONDITIONING_BLOCK_DIMENSION = 32;
+    public static final int MIN_PRECONDITIONING_BLOCK_DIMS = 8;
+    public static final int MAX_PRECONDITIONING_BLOCK_DIMS = 384;
+    public static final int MAX_DIMENSIONS = 4096;
+
+    public enum QuantEncoding {
+        ONE_BIT_4BIT_QUERY(0, (byte) 1, (byte) 4) {
+            @Override
+            public void pack(int[] quantized, byte[] destination) {
+                ESVectorUtil.packAsBinary(quantized, destination);
+            }
+
+            @Override
+            public void packQuery(int[] quantized, byte[] destination) {
+                ESVectorUtil.transposeHalfByte(quantized, destination);
+            }
+        },
+        TWO_BIT_4BIT_QUERY(1, (byte) 2, (byte) 4) {
+            @Override
+            public void pack(int[] quantized, byte[] destination) {
+                ESVectorUtil.packDibit(quantized, destination);
+            }
+
+            @Override
+            public void packQuery(int[] quantized, byte[] destination) {
+                ESVectorUtil.transposeHalfByte(quantized, destination);
+            }
+
+            @Override
+            public int discretizedDimensions(int dimensions) {
+                int queryDiscretized = (dimensions * 4 + 7) / 8 * 8 / 4;
+                // we want to force dibit packing to byte boundaries assuming single bit striping
+                // so we discretize to the same as single bit encoding
+                int docDiscretized = (dimensions + 7) / 8 * 8;
+                int maxDiscretized = Math.max(queryDiscretized, docDiscretized);
+                assert maxDiscretized % (8.0 / 4) == 0 : "bad discretized=" + maxDiscretized + " for dim=" + dimensions;
+                assert maxDiscretized % (8.0 / 2) == 0 : "bad discretized=" + maxDiscretized + " for dim=" + dimensions;
+                return maxDiscretized;
+            }
+
+            @Override
+            public int getDocPackedLength(int dimensions) {
+                // discretized to single bit encoding, but we assume dibit packing (2 bits per value)
+                // so we need twice as many bytes as single bit encoding
+                int discretized = discretizedDimensions(dimensions);
+                return 2 * ((discretized + 7) / 8);
+            }
+        },
+        FOUR_BIT_SYMMETRIC_STRIPED(2, (byte) 4, (byte) 4) {
+            @Override
+            public void packQuery(int[] quantized, byte[] destination) {
+                ESVectorUtil.transposeHalfByte(quantized, destination);
+            }
+
+            @Override
+            public void pack(int[] quantized, byte[] destination) {
+                ESVectorUtil.transposeHalfByte(quantized, destination);
+            }
+
+            @Override
+            public int getDocPackedLength(int dimensions) {
+                int discretized = discretizedDimensions(dimensions);
+                return 4 * ((discretized + 7) / 8);
+            }
+
+            @Override
+            public int getQueryPackedLength(int dimensions) {
+                return getDocPackedLength(dimensions);
+            }
+
+            @Override
+            public int discretizedDimensions(int dimensions) {
+                int totalBits = dimensions * 4;
+                return (totalBits + 7) / 8 * 8 / 4;
+            }
+        },
+        SEVEN_BIT_SYMMETRIC(3, (byte) 7, (byte) 7) {
+            @Override
+            public void pack(int[] quantized, byte[] destination) {
+                packAsBytes(quantized, destination);
+            }
+
+            @Override
+            public void packQuery(int[] quantized, byte[] destination) {
+                packAsBytes(quantized, destination);
+            }
+
+            @Override
+            public int discretizedDimensions(int dimensions) {
+                return dimensions;
+            }
+
+            @Override
+            public int getDocPackedLength(int dimensions) {
+                return discretizedDimensions(dimensions);
+            }
+
+            @Override
+            public int getQueryPackedLength(int dimensions) {
+                return discretizedDimensions(dimensions);
+            }
+        },
+        FOUR_BIT_SYMMETRIC_PACKED(4, (byte) 4, (byte) 4) {
+            @Override
+            public void packQuery(int[] quantized, byte[] destination) {
+                packAsBytes(quantized, destination);
+            }
+
+            @Override
+            public void pack(int[] quantized, byte[] destination) {
+                packNibbles(quantized, destination);
+            }
+
+            @Override
+            public int getDocPackedLength(int dimensions) {
+                int discretized = discretizedDimensions(dimensions);
+                return discretized / 2;
+            }
+
+            @Override
+            public int getQueryPackedLength(int dimensions) {
+                return discretizedDimensions(dimensions);
+            }
+
+            @Override
+            public int discretizedDimensions(int dimensions) {
+                int totalBits = dimensions * 4;
+                return (totalBits + 7) / 8 * 8 / 4;
+            }
+        };
+
+        private static void packAsBytes(int[] quantized, byte[] destination) {
+            for (int i = 0; i < quantized.length; i++) {
+                destination[i] = (byte) quantized[i];
+            }
+        }
+
+        private static void packNibbles(int[] quantized, byte[] destination) {
+            assert quantized.length == destination.length * 2;
+            int packedLength = destination.length;
+            for (int i = 0; i < packedLength; i++) {
+                destination[i] = (byte) ((quantized[i] << 4) | (quantized[packedLength + i] & 0x0F));
+            }
+        }
+
+        private final int id;
+        private final byte bits, queryBits;
+
+        QuantEncoding(int id, byte bits, byte queryBits) {
+            this.id = id;
+            this.bits = bits;
+            this.queryBits = queryBits;
+        }
+
+        public abstract void pack(int[] quantized, byte[] destination);
+
+        public abstract void packQuery(int[] quantized, byte[] destination);
+
+        public int id() {
+            return id;
+        }
+
+        public byte bits() {
+            return bits;
+        }
+
+        public byte queryBits() {
+            return queryBits;
+        }
+
+        public int discretizedDimensions(int dimensions) {
+            if (queryBits == bits) {
+                int totalBits = dimensions * bits;
+                return (totalBits + 7) / 8 * 8 / bits;
+            }
+            int queryDiscretized = (dimensions * queryBits + 7) / 8 * 8 / queryBits;
+            int docDiscretized = (dimensions * bits + 7) / 8 * 8 / bits;
+            int maxDiscretized = Math.max(queryDiscretized, docDiscretized);
+            assert maxDiscretized % (8.0 / queryBits) == 0 : "bad discretized=" + maxDiscretized + " for dim=" + dimensions;
+            assert maxDiscretized % (8.0 / bits) == 0 : "bad discretized=" + maxDiscretized + " for dim=" + dimensions;
+            return maxDiscretized;
+        }
+
+        /** Return the number of bytes required to store a packed vector of the given dimensions. */
+        public int getDocPackedLength(int dimensions) {
+            int discretized = discretizedDimensions(dimensions);
+            // how many bytes do we need to store the quantized vector?
+            int totalBits = discretized * bits;
+            return (totalBits + 7) / 8;
+        }
+
+        public int getQueryPackedLength(int dimensions) {
+            int discretized = discretizedDimensions(dimensions);
+            // how many bytes do we need to store the quantized vector?
+            int totalBits = discretized * queryBits;
+            return (totalBits + 7) / 8;
+        }
+
+        public static QuantEncoding fromId(int id) {
+            for (QuantEncoding encoding : values()) {
+                if (encoding.id == id) {
+                    return encoding;
+                }
+            }
+            throw new IllegalArgumentException("Unknown QuantEncoding id: " + id);
+        }
+
+        public static QuantEncoding fromBits(byte bits) {
+            // JDK 11 port: switch expression -> traditional switch statement (no byte-layout impact).
+            switch (bits) {
+                case 1:
+                    return ONE_BIT_4BIT_QUERY;
+                case 2:
+                    return TWO_BIT_4BIT_QUERY;
+                case 4:
+                    return FOUR_BIT_SYMMETRIC_PACKED;
+                case 7:
+                    return SEVEN_BIT_SYMMETRIC;
+                default:
+                    throw new IllegalArgumentException("Unsupported bits: " + bits);
+            }
+        }
+    }
+
+    private final QuantEncoding quantEncoding;
+    private final int vectorPerCluster;
+    private final int centroidsPerParentCluster;
+    private final boolean useDirectIO;
+    private final FlatVectorsFormat rawVectorFormat;
+    private final TaskExecutor mergeExec;
+    private final int numMergeWorkers;
+    private final boolean doPrecondition;
+    private final int preconditioningBlockDimension;
+    private final int flatVectorThreshold;
+    private final int writeVersion;
+
+    public ES940DiskBBQVectorsFormat(int vectorPerCluster, int centroidsPerParentCluster) {
+        this(QuantEncoding.ONE_BIT_4BIT_QUERY, vectorPerCluster, centroidsPerParentCluster);
+    }
+
+    public ES940DiskBBQVectorsFormat(QuantEncoding quantEncoding, int vectorPerCluster, int centroidsPerParentCluster) {
+        this(
+            quantEncoding,
+            vectorPerCluster,
+            centroidsPerParentCluster,
+            false,
+            null,
+            1,
+            false,
+            DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+            defaultFlatThreshold(vectorPerCluster)
+        );
+    }
+
+    public ES940DiskBBQVectorsFormat(
+        QuantEncoding quantEncoding,
+        int vectorPerCluster,
+        int centroidsPerParentCluster,
+        boolean useDirectIO,
+        ExecutorService mergingExecutorService,
+        int maxMergingWorkers,
+        boolean doPrecondition,
+        int preconditioningBlockDimension
+    ) {
+        this(
+            quantEncoding,
+            vectorPerCluster,
+            centroidsPerParentCluster,
+            useDirectIO,
+            mergingExecutorService,
+            maxMergingWorkers,
+            doPrecondition,
+            preconditioningBlockDimension,
+            defaultFlatThreshold(vectorPerCluster)
+        );
+    }
+
+    public ES940DiskBBQVectorsFormat(
+        QuantEncoding quantEncoding,
+        int vectorPerCluster,
+        int centroidsPerParentCluster,
+        boolean useDirectIO,
+        ExecutorService mergingExecutorService,
+        int maxMergingWorkers,
+        boolean doPrecondition,
+        int preconditioningBlockDimension,
+        int flatVectorThreshold
+    ) {
+        this(
+            quantEncoding,
+            vectorPerCluster,
+            centroidsPerParentCluster,
+            useDirectIO,
+            mergingExecutorService,
+            maxMergingWorkers,
+            doPrecondition,
+            preconditioningBlockDimension,
+            flatVectorThreshold,
+            VERSION_CURRENT
+        );
+    }
+
+    public ES940DiskBBQVectorsFormat(
+        QuantEncoding quantEncoding,
+        int vectorPerCluster,
+        int centroidsPerParentCluster,
+        boolean useDirectIO,
+        ExecutorService mergingExecutorService,
+        int maxMergingWorkers,
+        boolean doPrecondition,
+        int preconditioningBlockDimension,
+        int flatVectorThreshold,
+        int writeVersion
+    ) {
+        super(NAME);
+        if (vectorPerCluster < MIN_VECTORS_PER_CLUSTER || vectorPerCluster > MAX_VECTORS_PER_CLUSTER) {
+            throw new IllegalArgumentException(
+                "vectorsPerCluster must be between "
+                    + MIN_VECTORS_PER_CLUSTER
+                    + " and "
+                    + MAX_VECTORS_PER_CLUSTER
+                    + ", got: "
+                    + vectorPerCluster
+            );
+        }
+        if (centroidsPerParentCluster < MIN_CENTROIDS_PER_PARENT_CLUSTER || centroidsPerParentCluster > MAX_CENTROIDS_PER_PARENT_CLUSTER) {
+            throw new IllegalArgumentException(
+                "centroidsPerParentCluster must be between "
+                    + MIN_CENTROIDS_PER_PARENT_CLUSTER
+                    + " and "
+                    + MAX_CENTROIDS_PER_PARENT_CLUSTER
+                    + ", got: "
+                    + centroidsPerParentCluster
+            );
+        }
+        if (doPrecondition
+            && (preconditioningBlockDimension < MIN_PRECONDITIONING_BLOCK_DIMS
+                || preconditioningBlockDimension > MAX_PRECONDITIONING_BLOCK_DIMS)) {
+            throw new IllegalArgumentException(
+                "preconditioningBlockDimension must be between "
+                    + MIN_PRECONDITIONING_BLOCK_DIMS
+                    + " and "
+                    + MAX_PRECONDITIONING_BLOCK_DIMS
+                    + ", got: "
+                    + preconditioningBlockDimension
+            );
+        }
+        if (flatVectorThreshold < -1) {
+            throw new IllegalArgumentException(
+                "flatVectorThreshold must be -1 (dynamic), 0 (disabled), or > 0, got: " + flatVectorThreshold
+            );
+        }
+        this.vectorPerCluster = vectorPerCluster;
+        this.centroidsPerParentCluster = centroidsPerParentCluster;
+        this.quantEncoding = quantEncoding;
+        this.rawVectorFormat = float32VectorFormat;
+        this.useDirectIO = useDirectIO;
+        this.mergeExec = mergingExecutorService == null ? null : new TaskExecutor(mergingExecutorService);
+        this.numMergeWorkers = maxMergingWorkers;
+        this.preconditioningBlockDimension = preconditioningBlockDimension;
+        this.doPrecondition = doPrecondition;
+        this.flatVectorThreshold = flatVectorThreshold == -1 ? defaultFlatThreshold(vectorPerCluster) : flatVectorThreshold;
+        this.writeVersion = writeVersion;
+        if (writeVersion < VERSION_PACKED_INT4 && quantEncoding == QuantEncoding.FOUR_BIT_SYMMETRIC_PACKED) {
+            throw new IllegalArgumentException("Packed 4-bit encoding requires version " + VERSION_PACKED_INT4 + " or later");
+        }
+        if (writeVersion >= VERSION_PACKED_INT4 && quantEncoding == QuantEncoding.FOUR_BIT_SYMMETRIC_STRIPED) {
+            throw new IllegalArgumentException("Striped 4-bit encoding requires version before " + VERSION_PACKED_INT4);
+        }
+    }
+
+    /** Constructs a format using the given graph construction parameters and scalar quantization. */
+    public ES940DiskBBQVectorsFormat() {
+        this(DEFAULT_VECTORS_PER_CLUSTER, DEFAULT_CENTROIDS_PER_PARENT_CLUSTER);
+    }
+
+    @Override
+    public KnnVectorsWriter fieldsWriter(SegmentWriteState state) throws IOException {
+        return new ES940DiskBBQVectorsWriter(
+            state,
+            rawVectorFormat.getName(),
+            useDirectIO,
+            rawVectorFormat.fieldsWriter(state),
+            quantEncoding,
+            vectorPerCluster,
+            centroidsPerParentCluster,
+            mergeExec,
+            numMergeWorkers,
+            preconditioningBlockDimension,
+            doPrecondition,
+            flatVectorThreshold,
+            writeVersion
+        );
+    }
+
+    @Override
+    public KnnVectorsReader fieldsReader(SegmentReadState state) throws IOException {
+        // Full standalone ES940 DiskBBQ reader: serves IVF search AND delegates raw-vector access to the
+        // flat reader for merge (IVFVectorsWriter.mergeOneFieldIVF reads MergedVectorValues). The raw
+        // vectors are always a plain Lucene99FlatVectorsFormat (see this format's rawVectorFormat), so
+        // the loader ignores the recorded format name / DirectIO flag and returns that flat reader.
+        return new ES940DiskBBQVectorsReader(state, (formatName, useDirectIORead) -> rawVectorFormat.fieldsReader(state));
+    }
+
+    @Override
+    public int getMaxDimensions(String fieldName) {
+        return MAX_DIMENSIONS;
+    }
+
+    @Override
+    public String toString() {
+        return "ES940DiskBBQVectorsFormat(" + "vectorPerCluster=" + vectorPerCluster + ", " + "mergeExec=" + (mergeExec != null) + ')';
+    }
+
+}

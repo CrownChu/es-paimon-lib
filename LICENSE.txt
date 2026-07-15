@@ -1,0 +1,15 @@
+ESLib License Information
+
+This distribution contains code derived from Elasticsearch whose source file
+headers offer a choice of the Elastic License 2.0, the GNU Affero General
+Public License v3.0 only, or the Server Side Public License v1. The
+Elasticsearch-derived portions in this binary distribution are redistributed
+under the Elastic License 2.0. Unless a source file states otherwise, original
+ESLib code is also made available under the Elastic License 2.0. See
+licenses/ELASTIC-LICENSE-2.0.txt for the complete terms.
+
+Certain source files are derived from Apache Lucene and remain licensed under
+the Apache License, Version 2.0. See licenses/APACHE-LICENSE-2.0.txt for the
+complete terms.
+
+See NOTICE.txt for copyright, attribution, and modification notices.

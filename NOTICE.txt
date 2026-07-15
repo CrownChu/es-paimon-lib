@@ -1,0 +1,13 @@
+ESLib
+
+This product contains modified software derived from Elasticsearch.
+
+Elasticsearch
+Copyright 2009-2024 Elasticsearch
+Modifications copyright (C) 2025 Elasticsearch B.V.
+
+This product includes software developed by The Apache Software Foundation
+(https://www.apache.org/), including portions derived from Apache Lucene.
+
+Apache Lucene
+Copyright 2014 The Apache Software Foundation

@@ -1,0 +1,79 @@
+// Lucene version switching: -Plucene=9 (default, JDK 11, Lucene 9.12) or -Plucene=10 (JDK 21+, Lucene 10.4)
+def luceneProfile = findProperty('lucene') ?: '9'
+
+ext {
+    if (luceneProfile == '10') {
+        // Lucene 10.4.0 to match ES 9.4.0 (lucene-core 10.4.0). The codec adapters bind to
+        // Lucene104Codec and the backward-codecs Lucene912Codec respectively; calling
+        // Codec.getDefault() from their SPI constructors would recurse during service loading.
+        luceneVersionOverride = '10.4.0'
+        jdkTarget = JavaVersion.VERSION_21
+    } else {
+        luceneVersionOverride = '9.12.0'
+        jdkTarget = JavaVersion.VERSION_11
+    }
+}
+
+java {
+    sourceCompatibility = jdkTarget
+    targetCompatibility = jdkTarget
+}
+
+sourceSets {
+    main {
+        java {
+            srcDir 'src/main/java'
+            if (luceneProfile == '10') {
+                srcDir 'src/lucene10/java'
+            } else {
+                srcDir 'src/lucene9/java'
+            }
+        }
+        resources {
+            srcDir 'src/main/resources'
+            if (luceneProfile == '10') {
+                srcDir 'src/lucene10/resources'
+            } else {
+                srcDir 'src/lucene9/resources'
+            }
+        }
+    }
+}
+
+dependencies {
+
+    // Lucene - version depends on profile
+    implementation "org.apache.lucene:lucene-core:${luceneVersionOverride}"
+    implementation "org.apache.lucene:lucene-analysis-common:${luceneVersionOverride}"
+    implementation "org.apache.lucene:lucene-codecs:${luceneVersionOverride}"
+    implementation "org.apache.lucene:lucene-queryparser:${luceneVersionOverride}"
+    // BoostingQuery (full-text Boost query) lives here.
+    implementation "org.apache.lucene:lucene-queries:${luceneVersionOverride}"
+    if (luceneProfile == '10') {
+        // PaimonLucene9Codec must delegate non-vector files to the exact codec that wrote the
+        // Lucene 9.12 archive when it is mounted by a Lucene 10 runtime.
+        implementation "org.apache.lucene:lucene-backward-codecs:${luceneVersionOverride}"
+    }
+
+    // SIMD vector acceleration (optional)
+    implementation project(':eslib-simdvec')
+
+    // Logging
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+
+    // Aliyun OSS for OSSRangeIndexInput
+    api("com.aliyun.oss:aliyun-sdk-oss:${ossVersion}") {
+        exclude module: 'commons-logging'
+    }
+
+    // Test
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.9.3'
+    testImplementation "org.apache.lucene:lucene-test-framework:${luceneVersionOverride}"
+}
+
+// Classifier to distinguish lucene9 vs lucene10 jars
+jar {
+    archiveClassifier = "lucene${luceneProfile}"
+}
+
+logger.lifecycle("eslib-core: lucene=${luceneProfile}, version=${luceneVersionOverride}, jdk=${jdkTarget}")

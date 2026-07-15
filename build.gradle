@@ -1,0 +1,97 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+def sourceRepositoryUrl = 'https://github.com/CrownChu/es-paimon-lib'
+
+allprojects {
+    group = 'io.github.paimon.eslib'
+    version = '1.0.6'
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'maven-publish'
+
+    // lucene=10 builds against Lucene 10.x on JDK 21; lucene=9 builds against Lucene 9.12
+    // on JDK 11. Keep every module on the same target so project dependencies remain compatible.
+    def jdkTarget = ((findProperty('lucene') ?: '9') == '10')
+            ? JavaVersion.VERSION_21
+            : JavaVersion.VERSION_11
+    java {
+        sourceCompatibility = jdkTarget
+        targetCompatibility = jdkTarget
+    }
+
+    ext {
+        luceneVersion = '9.12.0'
+        slf4jVersion = '1.7.36'
+        ossVersion = '3.17.4'
+    }
+
+    tasks.withType(Jar).configureEach {
+        from(rootProject.file('LICENSE.txt')) {
+            into 'META-INF'
+        }
+        from(rootProject.file('NOTICE.txt')) {
+            into 'META-INF'
+        }
+        from(rootProject.file('licenses')) {
+            into 'META-INF/licenses'
+        }
+    }
+
+    publishing {
+        repositories {
+            maven {
+                name = 'localRelease'
+                url = uri(rootProject.findProperty('releaseRepositoryDir')
+                        ?: rootProject.layout.buildDirectory.dir('repository').get().asFile)
+            }
+        }
+
+        publications {
+            mavenJava(MavenPublication) {
+                from components.java
+                pom {
+                    name = project.name
+                    description = 'Lucene-based multi-index builder and searcher for Apache Paimon integration'
+                    url = sourceRepositoryUrl
+                    licenses {
+                        license {
+                            name = 'Elastic License 2.0'
+                            url = 'https://www.elastic.co/licensing/elastic-license'
+                            distribution = 'repo'
+                        }
+                        license {
+                            name = 'The Apache License, Version 2.0'
+                            url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                            distribution = 'repo'
+                        }
+                    }
+                    developers {
+                        developer {
+                            id = 'CrownChu'
+                            name = 'CrownChu'
+                            url = 'https://github.com/CrownChu'
+                        }
+                    }
+                    scm {
+                        connection = 'scm:git:https://github.com/CrownChu/es-paimon-lib.git'
+                        developerConnection = 'scm:git:ssh://git@github.com/CrownChu/es-paimon-lib.git'
+                        url = sourceRepositoryUrl
+                    }
+                }
+            }
+        }
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+    }
+}

@@ -1,0 +1,2 @@
+org.elasticsearch.eslib.adapter.lucene10.PaimonLucene10Codec
+org.elasticsearch.eslib.adapter.lucene10.PaimonLucene9Codec
