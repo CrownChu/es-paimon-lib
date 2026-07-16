@@ -37,7 +37,7 @@ To write Maven artifacts to a local directory:
 
 ## Maven artifacts
 
-Version `1.0.6` is published from the `eslib-1.0.6` source tag. Binary artifacts and checksums are
+Version `1.0.7` is published from the `eslib-1.0.7` source tag. Binary artifacts and checksums are
 stored in the public
 [es-paimon-lib-releases](https://github.com/CrownChu/es-paimon-lib-releases) repository.
 
@@ -45,7 +45,7 @@ stored in the public
 <repositories>
     <repository>
         <id>eslib-github</id>
-        <url>https://raw.githubusercontent.com/CrownChu/es-paimon-lib-releases/eslib-1.0.6/repository</url>
+        <url>https://raw.githubusercontent.com/CrownChu/es-paimon-lib-releases/eslib-1.0.7/repository</url>
     </repository>
 </repositories>
 
@@ -53,13 +53,13 @@ stored in the public
     <dependency>
         <groupId>io.github.paimon.eslib</groupId>
         <artifactId>eslib-core</artifactId>
-        <version>1.0.6</version>
+        <version>1.0.7</version>
         <classifier>lucene9</classifier>
     </dependency>
     <dependency>
         <groupId>io.github.paimon.eslib</groupId>
         <artifactId>eslib-simdvec</artifactId>
-        <version>1.0.6</version>
+        <version>1.0.7</version>
     </dependency>
 </dependencies>
 ```

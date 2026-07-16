@@ -30,10 +30,48 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DefaultESIndexBuilderTest {
+
+    @Test
+    void ownsThreeBackgroundMergeThreadsForFourLuceneWorkers() throws Exception {
+        String property =
+                org.elasticsearch.eslib.adapter.PaimonHnswVectorsFormat
+                        .MERGE_WORKERS_PROPERTY;
+        String previous = System.getProperty(property);
+        DefaultESIndexBuilder builder = null;
+        try {
+            System.setProperty(property, "4");
+            FieldIndexConfig vectorConfig =
+                    FieldIndexConfig.builder("vector", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(VectorAlgorithm.INT8_HNSW)
+                            .dimension(32)
+                            .metric("dot_product")
+                            .build();
+            Path indexDir = tempDir.resolve("explicit-merge-executor");
+            Files.createDirectories(indexDir);
+
+            builder = new DefaultESIndexBuilder(Map.of("vector", vectorConfig), indexDir);
+            assertEquals(4, builder.hnswMergeWorkers());
+            assertEquals(3, builder.hnswMergeBackgroundThreads());
+            assertTrue(builder.hnswMergeExecutorEnabled());
+            assertFalse(builder.hnswMergeExecutorShutdown());
+            builder.close();
+            assertTrue(builder.hnswMergeExecutorShutdown());
+        } finally {
+            if (builder != null) {
+                builder.close();
+            }
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
 
     @Test
     void rejectsFieldConfigWhoseMapKeyDoesNotMatchItsFieldName() {
@@ -46,6 +84,39 @@ class DefaultESIndexBuilderTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new DefaultESIndexBuilder(configs));
+    }
+
+    @Test
+    void configuresLuceneRamBufferWithoutChangingTheDefault() throws Exception {
+        Map<String, FieldIndexConfig> configs = new HashMap<>();
+        configs.put(
+                "value",
+                FieldIndexConfig.builder("value", FieldIndexConfig.IndexType.SCALAR)
+                        .scalarType(ScalarFieldType.INT)
+                        .build());
+
+        Path defaultIndex = tempDir.resolve("default-ram-buffer");
+        Files.createDirectories(defaultIndex);
+        try (DefaultESIndexBuilder builder =
+                new DefaultESIndexBuilder(configs, defaultIndex)) {
+            assertEquals(
+                    IndexWriterConfig.DEFAULT_RAM_BUFFER_SIZE_MB,
+                    builder.ramBufferSizeMb(),
+                    0.0d);
+        }
+
+        Path configuredIndex = tempDir.resolve("configured-ram-buffer");
+        Files.createDirectories(configuredIndex);
+        try (DefaultESIndexBuilder builder =
+                new DefaultESIndexBuilder(configs, configuredIndex, 256)) {
+            assertEquals(256.0d, builder.ramBufferSizeMb(), 0.0d);
+        }
+
+        Path invalidIndex = tempDir.resolve("invalid-ram-buffer");
+        Files.createDirectories(invalidIndex);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new DefaultESIndexBuilder(configs, invalidIndex, 0));
     }
 
     @TempDir
@@ -175,6 +246,40 @@ class DefaultESIndexBuilderTest {
                             .getFieldInfos()
                             .fieldInfo("vector")
                             .getVectorSimilarityFunction());
+        }
+    }
+
+    @Test
+    void int8HnswBuildsAndSearchesScalarQuantizedVectors() throws Exception {
+        int dimension = 32;
+        int vectorCount = 200;
+        Map<String, FieldIndexConfig> configs = new HashMap<>();
+        configs.put(
+                "vector",
+                FieldIndexConfig.builder("vector", FieldIndexConfig.IndexType.VECTOR)
+                        .algorithm(VectorAlgorithm.INT8_HNSW)
+                        .dimension(dimension)
+                        .metric("dot_product")
+                        .algorithmParams(Map.of("m", "16", "ef_construction", "64"))
+                        .build());
+
+        float[][] vectors = normalizedVectors(vectorCount, dimension);
+        Path indexDir = tempDir.resolve("int8-hnsw-index");
+        Files.createDirectories(indexDir);
+        try (DefaultESIndexBuilder builder = new DefaultESIndexBuilder(configs, indexDir)) {
+            for (int i = 0; i < vectors.length; i++) {
+                builder.addVector("vector", i, vectors[i]);
+            }
+            builder.build();
+        }
+
+        try (Directory directory = FSDirectory.open(indexDir);
+                DirectoryReader reader = DirectoryReader.open(directory)) {
+            TopDocs hits =
+                    new IndexSearcher(reader)
+                            .search(new KnnFloatVectorQuery("vector", vectors[0], 10), 10);
+            assertTrue(hits.scoreDocs.length > 0);
+            assertTrue(Float.isFinite(hits.scoreDocs[0].score));
         }
     }
 

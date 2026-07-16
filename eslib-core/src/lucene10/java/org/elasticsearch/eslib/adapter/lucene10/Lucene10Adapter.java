@@ -9,12 +9,19 @@ import org.elasticsearch.eslib.api.model.FieldIndexConfig;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 
 public class Lucene10Adapter implements LuceneAdapter {
 
     @Override
     public Codec createCodec(Map<String, FieldIndexConfig> fieldConfigs) {
         return new PaimonLucene10Codec(fieldConfigs);
+    }
+
+    @Override
+    public Codec createCodecForBuild(
+            Map<String, FieldIndexConfig> fieldConfigs, ExecutorService mergeExecutor) {
+        return new PaimonLucene10Codec(fieldConfigs, mergeExecutor);
     }
 
     @Override

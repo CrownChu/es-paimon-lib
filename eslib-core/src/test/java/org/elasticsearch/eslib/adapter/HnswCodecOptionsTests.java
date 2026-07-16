@@ -5,9 +5,12 @@
 package org.elasticsearch.eslib.adapter;
 
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -35,6 +38,113 @@ class HnswCodecOptionsTests {
         assertInstanceOf(PaimonHnswVectorsFormat.class, format);
         assertTrue(format.toString().contains("maxConn=30"), format.toString());
         assertTrue(format.toString().contains("beamWidth=360"), format.toString());
+    }
+
+    @Test
+    void configuredMergeWorkersReachLuceneHnswFormat() throws Exception {
+        String previous = System.getProperty(PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY);
+        try {
+            System.setProperty(PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, "4");
+            FieldIndexConfig config =
+                    FieldIndexConfig.builder("emb", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(VectorAlgorithm.HNSW)
+                            .dimension(768)
+                            .metric("cosine")
+                            .build();
+
+            Codec codec = createProfileCodec(Map.of("emb", config));
+            PerFieldKnnVectorsFormat perField =
+                    (PerFieldKnnVectorsFormat) codec.knnVectorsFormat();
+            KnnVectorsFormat format = perField.getKnnVectorsFormatForField("emb");
+
+            assertInstanceOf(PaimonHnswVectorsFormat.class, format);
+            assertTrue(format.toString().contains("mergeWorkers=4"), format.toString());
+        } finally {
+            restoreSystemProperty(
+                    PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, previous);
+        }
+    }
+
+    @Test
+    void buildCodecPassesExplicitMergeExecutorToFloatAndInt8Hnsw() throws Exception {
+        String previous = System.getProperty(PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY);
+        ExecutorService mergeExecutor = Executors.newFixedThreadPool(3);
+        try {
+            System.setProperty(PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, "4");
+            FieldIndexConfig floatConfig =
+                    FieldIndexConfig.builder("float_emb", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(VectorAlgorithm.HNSW)
+                            .dimension(32)
+                            .metric("dot_product")
+                            .build();
+            FieldIndexConfig int8Config =
+                    FieldIndexConfig.builder("int8_emb", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(VectorAlgorithm.INT8_HNSW)
+                            .dimension(32)
+                            .metric("dot_product")
+                            .build();
+
+            Codec codec =
+                    LuceneAdapterFactory.get()
+                            .createCodecForBuild(
+                                    Map.of(
+                                            "float_emb", floatConfig,
+                                            "int8_emb", int8Config),
+                                    mergeExecutor);
+            PerFieldKnnVectorsFormat perField =
+                    (PerFieldKnnVectorsFormat) codec.knnVectorsFormat();
+
+            KnnVectorsFormat floatFormat =
+                    perField.getKnnVectorsFormatForField("float_emb");
+            KnnVectorsFormat int8Format =
+                    perField.getKnnVectorsFormatForField("int8_emb");
+            assertInstanceOf(PaimonHnswVectorsFormat.class, floatFormat);
+            assertInstanceOf(PaimonInt8HnswVectorsFormat.class, int8Format);
+            assertTrue(
+                    floatFormat.toString().contains("explicitMergeExecutor=true"),
+                    floatFormat.toString());
+            assertTrue(
+                    int8Format.toString().contains("explicitMergeExecutor=true"),
+                    int8Format.toString());
+        } finally {
+            mergeExecutor.shutdownNow();
+            restoreSystemProperty(
+                    PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, previous);
+        }
+    }
+
+    @Test
+    void configuredParametersReachLuceneInt8HnswFormat() throws Exception {
+        FieldIndexConfig config =
+                FieldIndexConfig.builder("emb", FieldIndexConfig.IndexType.VECTOR)
+                        .algorithm(VectorAlgorithm.INT8_HNSW)
+                        .dimension(768)
+                        .metric("dot_product")
+                        .algorithmParams(Map.of("m", "24", "ef_construction", "160"))
+                        .build();
+
+        Codec codec = createProfileCodec(Map.of("emb", config));
+        PerFieldKnnVectorsFormat perField =
+                (PerFieldKnnVectorsFormat) codec.knnVectorsFormat();
+        KnnVectorsFormat format = perField.getKnnVectorsFormatForField("emb");
+
+        assertInstanceOf(PaimonInt8HnswVectorsFormat.class, format);
+        assertTrue(format.toString().contains("maxConn=24"), format.toString());
+        assertTrue(format.toString().contains("beamWidth=160"), format.toString());
+    }
+
+    @Test
+    void rejectsInvalidMergeWorkerCount() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new PaimonHnswVectorsFormat(16, 100, 0));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        new PaimonHnswVectorsFormat(
+                                16,
+                                100,
+                                PaimonHnswVectorsFormat.MAX_MERGE_WORKERS + 1));
     }
 
     @Test
@@ -68,5 +178,13 @@ class HnswCodecOptionsTests {
             className = "org.elasticsearch.eslib.adapter.lucene10.PaimonLucene10Codec";
         }
         return (Codec) Class.forName(className).getConstructor(Map.class).newInstance(configs);
+    }
+
+    private static void restoreSystemProperty(String key, String value) {
+        if (value == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
+        }
     }
 }
