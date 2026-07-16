@@ -20,9 +20,11 @@ import org.apache.lucene.search.SortedNumericSortField;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.util.IOUtils;
+import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.eslib.adapter.LuceneAdapter;
 import org.elasticsearch.eslib.adapter.LuceneAdapterFactory;
+import org.elasticsearch.eslib.adapter.PaimonHnswVectorsFormat;
 import org.elasticsearch.eslib.analyzer.BuiltinAnalyzers;
 import org.elasticsearch.eslib.api.ESIndexBuilder;
 import org.elasticsearch.eslib.api.model.BuiltinAnalyzer;
@@ -35,6 +37,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -45,13 +49,17 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class DefaultESIndexBuilder implements ESIndexBuilder {
 
     private static final Logger LOG = LoggerFactory.getLogger(DefaultESIndexBuilder.class);
+    private static final long FORCE_MERGE_HEARTBEAT_MILLIS = 60_000L;
 
     private final Map<String, FieldIndexConfig> fieldConfigs;
     private final Path outputDir;
+    private final String buildId;
+    private final boolean hnswBuild;
     private final IndexWriter writer;
     private final Directory directory;
     private final Map<String, Analyzer> fieldAnalyzers;
@@ -90,19 +98,44 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
         this(
             validateFieldConfigs(fieldConfigs),
             Files.createTempDirectory("eslib-index-"),
-            true);
+            true,
+            null);
+    }
+
+    /** Creates a temporary index using the requested Lucene RAM buffer size. */
+    public DefaultESIndexBuilder(
+            Map<String, FieldIndexConfig> fieldConfigs, int ramBufferSizeMb) throws IOException {
+        this(
+            validateFieldConfigs(fieldConfigs),
+            Files.createTempDirectory("eslib-index-"),
+            true,
+            ramBufferSizeMb);
     }
 
     public DefaultESIndexBuilder(Map<String, FieldIndexConfig> fieldConfigs, Path outputDir) throws IOException {
-        this(validateFieldConfigs(fieldConfigs), outputDir, false);
+        this(validateFieldConfigs(fieldConfigs), outputDir, false, null);
+    }
+
+    /** Creates an index in {@code outputDir} using the requested Lucene RAM buffer size. */
+    public DefaultESIndexBuilder(
+            Map<String, FieldIndexConfig> fieldConfigs,
+            Path outputDir,
+            int ramBufferSizeMb) throws IOException {
+        this(validateFieldConfigs(fieldConfigs), outputDir, false, ramBufferSizeMb);
     }
 
     private DefaultESIndexBuilder(
             Map<String, FieldIndexConfig> fieldConfigs,
             Path outputDir,
-            boolean deleteOutputOnFailure) throws IOException {
+            boolean deleteOutputOnFailure,
+            Integer ramBufferSizeMb) throws IOException {
         this.fieldConfigs = new HashMap<>(Objects.requireNonNull(fieldConfigs, "fieldConfigs"));
         this.outputDir = Objects.requireNonNull(outputDir, "outputDir");
+        this.buildId = outputDir.getFileName() == null
+            ? outputDir.toString()
+            : outputDir.getFileName().toString();
+        this.hnswBuild = this.fieldConfigs.values().stream()
+            .anyMatch(config -> config.algorithm() == VectorAlgorithm.HNSW);
         this.pendingDocs = new HashMap<>();
         this.normalizeVectors = Boolean.parseBoolean(System.getProperty(NORMALIZE_VECTOR_PROP, "false"));
         if (normalizeVectors) {
@@ -135,6 +168,15 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
             IndexWriterConfig iwc = new IndexWriterConfig(candidateIndexAnalyzer);
             iwc.setCodec(codec);
             iwc.setUseCompoundFile(false);
+            if (ramBufferSizeMb != null) {
+                iwc.setRAMBufferSizeMB(validateRamBufferSizeMb(ramBufferSizeMb));
+            }
+            if (hnswBuild) {
+                // Lucene's HNSW builder emits a progress record every 10K graph nodes through
+                // InfoStream. Route only that component to normal task logs; enabling all Lucene
+                // components would produce a large amount of low-level merge noise.
+                iwc.setInfoStream(new HnswLoggingInfoStream(buildId));
+            }
 
         // Sort segments by the paimon global _ROW_ID NumericDocValuesField. This
         // ensures (a) intra-segment docs flushed mid-build are stored by _ROW_ID and
@@ -176,6 +218,25 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
         this.indexAnalyzer = candidateIndexAnalyzer;
         this.directory = candidateDirectory;
         this.writer = candidateWriter;
+        if (hnswBuild) {
+            LOG.info(
+                "ESLIB_HNSW event=builder_created buildId={} fields={} mergeWorkers={} "
+                    + "ramBufferMiB={} availableProcessors={} outputDir={}",
+                buildId,
+                this.fieldConfigs.keySet(),
+                PaimonHnswVectorsFormat.configuredMergeWorkers(),
+                this.writer.getConfig().getRAMBufferSizeMB(),
+                Runtime.getRuntime().availableProcessors(),
+                outputDir);
+        }
+    }
+
+    private static int validateRamBufferSizeMb(int ramBufferSizeMb) {
+        if (ramBufferSizeMb <= 0) {
+            throw new IllegalArgumentException(
+                "Lucene RAM buffer size must be positive; got: " + ramBufferSizeMb);
+        }
+        return ramBufferSizeMb;
     }
 
     private static Map<String, FieldIndexConfig> validateFieldConfigs(
@@ -382,22 +443,271 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
     @Override
     public void build() throws IOException {
         checkNotBuilt();
+        long buildStartNanos = System.nanoTime();
+        if (hnswBuild) {
+            LOG.info(
+                "ESLIB_HNSW event=build_start buildId={} vectors={} scalarValues={} "
+                    + "textValues={} pendingDocs={} heapUsedMiB={}",
+                buildId,
+                addVectorCalls,
+                addScalarCalls,
+                addTextCalls,
+                pendingDocs.size(),
+                heapUsedMiB());
+        }
         if (LOG.isDebugEnabled()) {
             LOG.debug(
                 "[build] starting — fieldConfigs={}, addVector={}, addScalar={}, addText={}, pendingDocs.size={}, codec={}",
                 fieldConfigs.keySet(), addVectorCalls, addScalarCalls, addTextCalls,
                 pendingDocs.size(), writer.getConfig().getCodec().getClass().getSimpleName());
         }
+        long flushStartNanos = System.nanoTime();
         flushPendingDocs();
-        long t0 = System.currentTimeMillis();
-        writer.forceMerge(1);
-        long t1 = System.currentTimeMillis();
-        long mergeMs = t1 - t0;
-        int segCount = writer.getDocStats().numDocs;
-        LOG.debug("[build] forceMerge(1) done in {}ms; writer.numDocs={}", mergeMs, segCount);
+        if (hnswBuild) {
+            IndexWriter.DocStats stats = writer.getDocStats();
+            LOG.info(
+                "ESLIB_HNSW event=flush_done buildId={} elapsedMs={} numDocs={} maxDoc={} "
+                    + "writerRamMiB={} heapUsedMiB={}",
+                buildId,
+                elapsedMillis(flushStartNanos),
+                stats.numDocs,
+                stats.maxDoc,
+                bytesToMiB(writer.ramBytesUsed()),
+                heapUsedMiB());
+        }
+
+        long mergeStartNanos = System.nanoTime();
+        if (hnswBuild) {
+            IndexWriter.DocStats stats = writer.getDocStats();
+            LOG.info(
+                "ESLIB_HNSW event=force_merge_start buildId={} numDocs={} maxDoc={} "
+                    + "mergeWorkers={} heapUsedMiB={}",
+                buildId,
+                stats.numDocs,
+                stats.maxDoc,
+                PaimonHnswVectorsFormat.configuredMergeWorkers(),
+                heapUsedMiB());
+        }
+        ForceMergeHeartbeat heartbeat = hnswBuild ? startForceMergeHeartbeat(mergeStartNanos) : null;
+        try {
+            writer.forceMerge(1);
+        } catch (IOException | RuntimeException | Error failure) {
+            if (hnswBuild) {
+                LOG.error(
+                    "ESLIB_HNSW event=force_merge_failed buildId={} elapsedMs={} errorType={} "
+                        + "message={}",
+                    buildId,
+                    elapsedMillis(mergeStartNanos),
+                    failure.getClass().getName(),
+                    failure.getMessage());
+            }
+            throw failure;
+        } finally {
+            if (heartbeat != null) {
+                heartbeat.stop();
+            }
+        }
+        long mergeMs = elapsedMillis(mergeStartNanos);
+        int numDocs = writer.getDocStats().numDocs;
+        if (hnswBuild) {
+            LOG.info(
+                "ESLIB_HNSW event=force_merge_done buildId={} elapsedMs={} numDocs={} "
+                    + "heapUsedMiB={} indexBytes={}",
+                buildId,
+                mergeMs,
+                numDocs,
+                heapUsedMiB(),
+                directoryStats().bytes);
+        }
+        LOG.debug("[build] forceMerge(1) done in {}ms; writer.numDocs={}", mergeMs, numDocs);
+        long closeStartNanos = System.nanoTime();
         writer.close();
         built = true;
-        LOG.debug("[build] done — numDocs={}, mergeMs={}, indexDir={}", segCount, mergeMs, outputDir);
+        if (hnswBuild) {
+            DirectoryStats directoryStats = directoryStats();
+            LOG.info(
+                "ESLIB_HNSW event=build_done buildId={} totalElapsedMs={} mergeMs={} "
+                    + "writerCloseMs={} numDocs={} indexFiles={} indexBytes={} heapUsedMiB={}",
+                buildId,
+                elapsedMillis(buildStartNanos),
+                mergeMs,
+                elapsedMillis(closeStartNanos),
+                numDocs,
+                directoryStats.files,
+                directoryStats.bytes,
+                heapUsedMiB());
+        }
+        LOG.debug("[build] done — numDocs={}, mergeMs={}, indexDir={}", numDocs, mergeMs, outputDir);
+    }
+
+    private ForceMergeHeartbeat startForceMergeHeartbeat(long mergeStartNanos) {
+        AtomicBoolean running = new AtomicBoolean(true);
+        Thread thread = new Thread(
+            () -> {
+                while (running.get()) {
+                    try {
+                        Thread.sleep(FORCE_MERGE_HEARTBEAT_MILLIS);
+                    } catch (InterruptedException e) {
+                        if (!running.get()) {
+                            return;
+                        }
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    if (running.get()) {
+                        logForceMergeHeartbeat(mergeStartNanos);
+                    }
+                }
+            },
+            "eslib-hnsw-progress-" + buildId);
+        thread.setDaemon(true);
+        thread.start();
+        return new ForceMergeHeartbeat(running, thread);
+    }
+
+    private void logForceMergeHeartbeat(long mergeStartNanos) {
+        try {
+            IndexWriter.DocStats stats = writer.getDocStats();
+            DirectoryStats directoryStats = directoryStats();
+            long[] gcStats = gcStats();
+            Runtime runtime = Runtime.getRuntime();
+            LOG.info(
+                "ESLIB_HNSW event=force_merge_heartbeat buildId={} elapsedMs={} numDocs={} "
+                    + "maxDoc={} mergingSegments={} writerRamMiB={} heapUsedMiB={} "
+                    + "heapCommittedMiB={} heapMaxMiB={} indexFiles={} indexBytes={} "
+                    + "gcCount={} gcTimeMs={}",
+                buildId,
+                elapsedMillis(mergeStartNanos),
+                stats.numDocs,
+                stats.maxDoc,
+                writer.getMergingSegments().size(),
+                bytesToMiB(writer.ramBytesUsed()),
+                bytesToMiB(runtime.totalMemory() - runtime.freeMemory()),
+                bytesToMiB(runtime.totalMemory()),
+                bytesToMiB(runtime.maxMemory()),
+                directoryStats.files,
+                directoryStats.bytes,
+                gcStats[0],
+                gcStats[1]);
+        } catch (RuntimeException failure) {
+            LOG.warn(
+                "ESLIB_HNSW event=force_merge_heartbeat_failed buildId={} errorType={} message={}",
+                buildId,
+                failure.getClass().getName(),
+                failure.getMessage());
+        }
+    }
+
+    private DirectoryStats directoryStats() {
+        int files = 0;
+        long bytes = 0L;
+        try {
+            String[] names = directory.listAll();
+            files = names.length;
+            for (String name : names) {
+                try {
+                    bytes += directory.fileLength(name);
+                } catch (IOException ignored) {
+                    // A concurrent merge can delete a source segment between listAll and
+                    // fileLength. The next heartbeat will observe the stable replacement files.
+                }
+            }
+        } catch (IOException ignored) {
+            return new DirectoryStats(-1, -1L);
+        }
+        return new DirectoryStats(files, bytes);
+    }
+
+    private static long[] gcStats() {
+        long count = 0L;
+        long timeMillis = 0L;
+        for (GarbageCollectorMXBean bean : ManagementFactory.getGarbageCollectorMXBeans()) {
+            if (bean.getCollectionCount() > 0) {
+                count += bean.getCollectionCount();
+            }
+            if (bean.getCollectionTime() > 0) {
+                timeMillis += bean.getCollectionTime();
+            }
+        }
+        return new long[] {count, timeMillis};
+    }
+
+    private static long heapUsedMiB() {
+        Runtime runtime = Runtime.getRuntime();
+        return bytesToMiB(runtime.totalMemory() - runtime.freeMemory());
+    }
+
+    private static long bytesToMiB(long bytes) {
+        return bytes < 0 ? -1L : bytes / (1024L * 1024L);
+    }
+
+    private static long elapsedMillis(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000L;
+    }
+
+    private static final class HnswLoggingInfoStream extends InfoStream {
+        private final String buildId;
+        private final long startedNanos = System.nanoTime();
+
+        private HnswLoggingInfoStream(String buildId) {
+            this.buildId = buildId;
+        }
+
+        @Override
+        public void message(String component, String message) {
+            // Concurrent merge workers reserve 2,048-node batches and emit one addVectors line
+            // per reservation. At one million vectors that is roughly 500 redundant lines per
+            // shard. Keep Lucene's 10K-node "built" checkpoints, start, and connectivity timing.
+            if (message.startsWith("addVectors [")) {
+                return;
+            }
+            LOG.info(
+                "ESLIB_HNSW event=lucene_progress buildId={} elapsedMs={} component={} detail={}",
+                buildId,
+                elapsedMillis(startedNanos),
+                component,
+                message);
+        }
+
+        @Override
+        public boolean isEnabled(String component) {
+            return "HNSW".equals(component);
+        }
+
+        @Override
+        public void close() {
+            // No resources. IndexWriterConfig owns the lifecycle of this InfoStream callback.
+        }
+    }
+
+    private static final class ForceMergeHeartbeat {
+        private final AtomicBoolean running;
+        private final Thread thread;
+
+        private ForceMergeHeartbeat(AtomicBoolean running, Thread thread) {
+            this.running = running;
+            this.thread = thread;
+        }
+
+        private void stop() {
+            running.set(false);
+            thread.interrupt();
+            try {
+                thread.join(1_000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static final class DirectoryStats {
+        private final int files;
+        private final long bytes;
+
+        private DirectoryStats(int files, long bytes) {
+            this.files = files;
+            this.bytes = bytes;
+        }
     }
 
     @Override
@@ -601,6 +911,10 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
 
     int pendingDocumentCount() {
         return pendingDocs.size();
+    }
+
+    double ramBufferSizeMb() {
+        return writer.getConfig().getRAMBufferSizeMB();
     }
 
     private static Document emptyDocument(long docId) {

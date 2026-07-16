@@ -48,6 +48,39 @@ class DefaultESIndexBuilderTest {
                 () -> new DefaultESIndexBuilder(configs));
     }
 
+    @Test
+    void configuresLuceneRamBufferWithoutChangingTheDefault() throws Exception {
+        Map<String, FieldIndexConfig> configs = new HashMap<>();
+        configs.put(
+                "value",
+                FieldIndexConfig.builder("value", FieldIndexConfig.IndexType.SCALAR)
+                        .scalarType(ScalarFieldType.INT)
+                        .build());
+
+        Path defaultIndex = tempDir.resolve("default-ram-buffer");
+        Files.createDirectories(defaultIndex);
+        try (DefaultESIndexBuilder builder =
+                new DefaultESIndexBuilder(configs, defaultIndex)) {
+            assertEquals(
+                    IndexWriterConfig.DEFAULT_RAM_BUFFER_SIZE_MB,
+                    builder.ramBufferSizeMb(),
+                    0.0d);
+        }
+
+        Path configuredIndex = tempDir.resolve("configured-ram-buffer");
+        Files.createDirectories(configuredIndex);
+        try (DefaultESIndexBuilder builder =
+                new DefaultESIndexBuilder(configs, configuredIndex, 256)) {
+            assertEquals(256.0d, builder.ramBufferSizeMb(), 0.0d);
+        }
+
+        Path invalidIndex = tempDir.resolve("invalid-ram-buffer");
+        Files.createDirectories(invalidIndex);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new DefaultESIndexBuilder(configs, invalidIndex, 0));
+    }
+
     @TempDir
     Path tempDir;
 

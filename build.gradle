@@ -7,7 +7,7 @@ def sourceRepositoryUrl = 'https://github.com/CrownChu/es-paimon-lib'
 
 allprojects {
     group = 'io.github.paimon.eslib'
-    version = '1.0.6'
+    version = '1.0.7'
 
     repositories {
         mavenCentral()

@@ -5,6 +5,7 @@
 package org.elasticsearch.eslib.adapter;
 
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
@@ -38,6 +39,45 @@ class HnswCodecOptionsTests {
     }
 
     @Test
+    void configuredMergeWorkersReachLuceneHnswFormat() throws Exception {
+        String previous = System.getProperty(PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY);
+        try {
+            System.setProperty(PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, "4");
+            FieldIndexConfig config =
+                    FieldIndexConfig.builder("emb", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(VectorAlgorithm.HNSW)
+                            .dimension(768)
+                            .metric("cosine")
+                            .build();
+
+            Codec codec = createProfileCodec(Map.of("emb", config));
+            PerFieldKnnVectorsFormat perField =
+                    (PerFieldKnnVectorsFormat) codec.knnVectorsFormat();
+            KnnVectorsFormat format = perField.getKnnVectorsFormatForField("emb");
+
+            assertInstanceOf(PaimonHnswVectorsFormat.class, format);
+            assertTrue(format.toString().contains("mergeWorkers=4"), format.toString());
+        } finally {
+            restoreSystemProperty(
+                    PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, previous);
+        }
+    }
+
+    @Test
+    void rejectsInvalidMergeWorkerCount() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new PaimonHnswVectorsFormat(16, 100, 0));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        new PaimonHnswVectorsFormat(
+                                16,
+                                100,
+                                PaimonHnswVectorsFormat.MAX_MERGE_WORKERS + 1));
+    }
+
+    @Test
     void diskBBQUsesTheSameDefaultsInEveryLuceneProfile() throws Exception {
         FieldIndexConfig config =
                 FieldIndexConfig.builder("emb", FieldIndexConfig.IndexType.VECTOR)
@@ -68,5 +108,13 @@ class HnswCodecOptionsTests {
             className = "org.elasticsearch.eslib.adapter.lucene10.PaimonLucene10Codec";
         }
         return (Codec) Class.forName(className).getConstructor(Map.class).newInstance(configs);
+    }
+
+    private static void restoreSystemProperty(String key, String value) {
+        if (value == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
+        }
     }
 }
