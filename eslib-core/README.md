@@ -39,7 +39,7 @@ classes used by DiskBBQ. An Elasticsearch plugin must instead use Elasticsearch'
 Lucene classes and consume `eslib-core` without transitive dependencies to avoid duplicate classes:
 
 ```gradle
-implementation('io.github.paimon.eslib:eslib-core:1.0.7:lucene9') {
+implementation('io.github.paimon.eslib:eslib-core-lucene9:1.0.7') {
     transitive = false
 }
 ```

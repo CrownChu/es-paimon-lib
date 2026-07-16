@@ -71,9 +71,4 @@ dependencies {
     testImplementation "org.apache.lucene:lucene-test-framework:${luceneVersionOverride}"
 }
 
-// Classifier to distinguish lucene9 vs lucene10 jars
-jar {
-    archiveClassifier = "lucene${luceneProfile}"
-}
-
 logger.lifecycle("eslib-core: lucene=${luceneProfile}, version=${luceneVersionOverride}, jdk=${jdkTarget}")

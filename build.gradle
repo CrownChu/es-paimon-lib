@@ -4,6 +4,10 @@ plugins {
 }
 
 def sourceRepositoryUrl = 'https://github.com/CrownChu/es-paimon-lib'
+def luceneProfile = (findProperty('lucene') ?: '9').toString()
+if (!(luceneProfile in ['9', '10'])) {
+    throw new GradleException("Unsupported Lucene profile '${luceneProfile}'; use 9 or 10")
+}
 
 allprojects {
     group = 'io.github.paimon.eslib'
@@ -20,7 +24,7 @@ subprojects {
 
     // lucene=10 builds against Lucene 10.x on JDK 21; lucene=9 builds against Lucene 9.12
     // on JDK 11. Keep every module on the same target so project dependencies remain compatible.
-    def jdkTarget = ((findProperty('lucene') ?: '9') == '10')
+    def jdkTarget = (luceneProfile == '10')
             ? JavaVersion.VERSION_21
             : JavaVersion.VERSION_11
     java {
@@ -58,6 +62,9 @@ subprojects {
         publications {
             mavenJava(MavenPublication) {
                 from components.java
+                // Lucene 9 and 10 are binary-incompatible release lines. Use distinct Maven
+                // artifactIds so their JARs, POMs, and Gradle metadata can coexist at one version.
+                artifactId = "${project.name}-lucene${luceneProfile}"
                 pom {
                     name = project.name
                     description = 'Lucene-based multi-index builder and searcher for Apache Paimon integration'
@@ -94,4 +101,41 @@ subprojects {
     tasks.withType(Test).configureEach {
         useJUnitPlatform()
     }
+}
+
+tasks.register('verifyPublicationCoordinates') {
+    group = 'verification'
+    description = 'Verifies that the selected Lucene line has isolated Maven coordinates.'
+    dependsOn subprojects.collect { it.tasks.named('generatePomFileForMavenJavaPublication') }
+    dependsOn subprojects.collect { it.tasks.named('generateMetadataFileForMavenJavaPublication') }
+
+    doLast {
+        def suffix = "lucene${luceneProfile}"
+        subprojects.each { subproject ->
+            def expectedArtifactId = "${subproject.name}-${suffix}"
+            def actualArtifactId = subproject.publishing.publications.mavenJava.artifactId
+            if (actualArtifactId != expectedArtifactId) {
+                throw new GradleException(
+                        "${subproject.path} publishes ${actualArtifactId}; expected ${expectedArtifactId}")
+            }
+        }
+
+        def expectedSimdArtifactId = "eslib-simdvec-${suffix}"
+        def corePom = project(':eslib-core').layout.buildDirectory
+                .file('publications/mavenJava/pom-default.xml').get().asFile.text
+        def coreModule = project(':eslib-core').layout.buildDirectory
+                .file('publications/mavenJava/module.json').get().asFile.text
+        if (!corePom.contains("<artifactId>${expectedSimdArtifactId}</artifactId>")) {
+            throw new GradleException(
+                    "Generated core POM does not depend on ${expectedSimdArtifactId}")
+        }
+        if (!coreModule.contains("\"module\": \"${expectedSimdArtifactId}\"")) {
+            throw new GradleException(
+                    "Generated core Gradle metadata does not depend on ${expectedSimdArtifactId}")
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyPublicationCoordinates')
 }
