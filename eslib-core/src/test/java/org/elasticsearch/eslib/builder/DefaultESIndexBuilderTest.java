@@ -30,10 +30,48 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DefaultESIndexBuilderTest {
+
+    @Test
+    void ownsThreeBackgroundMergeThreadsForFourLuceneWorkers() throws Exception {
+        String property =
+                org.elasticsearch.eslib.adapter.PaimonHnswVectorsFormat
+                        .MERGE_WORKERS_PROPERTY;
+        String previous = System.getProperty(property);
+        DefaultESIndexBuilder builder = null;
+        try {
+            System.setProperty(property, "4");
+            FieldIndexConfig vectorConfig =
+                    FieldIndexConfig.builder("vector", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(VectorAlgorithm.INT8_HNSW)
+                            .dimension(32)
+                            .metric("dot_product")
+                            .build();
+            Path indexDir = tempDir.resolve("explicit-merge-executor");
+            Files.createDirectories(indexDir);
+
+            builder = new DefaultESIndexBuilder(Map.of("vector", vectorConfig), indexDir);
+            assertEquals(4, builder.hnswMergeWorkers());
+            assertEquals(3, builder.hnswMergeBackgroundThreads());
+            assertTrue(builder.hnswMergeExecutorEnabled());
+            assertFalse(builder.hnswMergeExecutorShutdown());
+            builder.close();
+            assertTrue(builder.hnswMergeExecutorShutdown());
+        } finally {
+            if (builder != null) {
+                builder.close();
+            }
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
 
     @Test
     void rejectsFieldConfigWhoseMapKeyDoesNotMatchItsFieldName() {

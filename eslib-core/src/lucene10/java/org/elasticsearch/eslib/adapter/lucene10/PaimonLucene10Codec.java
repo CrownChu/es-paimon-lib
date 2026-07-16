@@ -2,6 +2,7 @@ package org.elasticsearch.eslib.adapter.lucene10;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import org.apache.lucene.codecs.FilterCodec;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.lucene104.Lucene104Codec;
@@ -22,10 +23,15 @@ public class PaimonLucene10Codec extends FilterCodec {
     }
 
     public PaimonLucene10Codec(Map<String, FieldIndexConfig> fieldConfigs) {
+        this(fieldConfigs, null);
+    }
+
+    public PaimonLucene10Codec(
+            Map<String, FieldIndexConfig> fieldConfigs, ExecutorService mergeExecutor) {
         // Codec.getDefault() cannot be called while Lucene's Codec SPI is constructing this
         // provider. This profile is compiled specifically against Lucene 10.4.
         super("PaimonLucene10", new Lucene104Codec());
-        this.knnFormat = new PaimonPerFieldKnnVectorsFormat102(fieldConfigs);
+        this.knnFormat = new PaimonPerFieldKnnVectorsFormat102(fieldConfigs, mergeExecutor);
     }
 
     @Override
@@ -36,16 +42,19 @@ public class PaimonLucene10Codec extends FilterCodec {
     private static class PaimonPerFieldKnnVectorsFormat102 extends PerFieldKnnVectorsFormat {
 
         private final Map<String, FieldIndexConfig> fieldConfigs;
+        private final ExecutorService mergeExecutor;
 
-        PaimonPerFieldKnnVectorsFormat102(Map<String, FieldIndexConfig> fieldConfigs) {
+        PaimonPerFieldKnnVectorsFormat102(
+                Map<String, FieldIndexConfig> fieldConfigs, ExecutorService mergeExecutor) {
             this.fieldConfigs = fieldConfigs;
+            this.mergeExecutor = mergeExecutor;
         }
 
         @Override
         public KnnVectorsFormat getKnnVectorsFormatForField(String fieldName) {
             FieldIndexConfig config = fieldConfigs.get(fieldName);
             if (config == null || config.getAlgorithm() == null) {
-                return new PaimonHnswVectorsFormat();
+                return new PaimonHnswVectorsFormat(mergeExecutor);
             }
             VectorAlgorithm algorithm = config.getAlgorithm();
             switch (algorithm) {
@@ -63,16 +72,24 @@ public class PaimonLucene10Codec extends FilterCodec {
                 case HNSW:
                     int m = config.getIntParam("m", 16);
                     int efConstruction = config.getIntParam("ef_construction", 100);
-                    return new PaimonHnswVectorsFormat(m, efConstruction);
+                    return new PaimonHnswVectorsFormat(
+                            m,
+                            efConstruction,
+                            PaimonHnswVectorsFormat.configuredMergeWorkers(),
+                            mergeExecutor);
                 case INT8_HNSW:
                     int int8M = config.getIntParam("m", 16);
                     int int8EfConstruction = config.getIntParam("ef_construction", 100);
-                    return new PaimonInt8HnswVectorsFormat(int8M, int8EfConstruction);
+                    return new PaimonInt8HnswVectorsFormat(
+                            int8M,
+                            int8EfConstruction,
+                            PaimonHnswVectorsFormat.configuredMergeWorkers(),
+                            mergeExecutor);
                 case NATIVE:
                     throw new UnsupportedOperationException(
                             "Native vector format requires eslib-native module");
                 default:
-                    return new PaimonHnswVectorsFormat();
+                    return new PaimonHnswVectorsFormat(mergeExecutor);
             }
         }
     }

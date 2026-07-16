@@ -8,6 +8,7 @@ import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
 
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
 
 /**
  * Lucene99 HNSW with Elasticsearch-compatible dimension validation.
@@ -28,6 +29,7 @@ public final class PaimonHnswVectorsFormat extends KnnVectorsFormat {
 
     private final Lucene99HnswVectorsFormat delegate;
     private final int mergeWorkers;
+    private final boolean explicitMergeExecutor;
 
     public PaimonHnswVectorsFormat() {
         this(
@@ -36,25 +38,45 @@ public final class PaimonHnswVectorsFormat extends KnnVectorsFormat {
             configuredMergeWorkers());
     }
 
+    public PaimonHnswVectorsFormat(ExecutorService mergeExecutor) {
+        this(
+            Lucene99HnswVectorsFormat.DEFAULT_MAX_CONN,
+            Lucene99HnswVectorsFormat.DEFAULT_BEAM_WIDTH,
+            configuredMergeWorkers(),
+            mergeExecutor);
+    }
+
     public PaimonHnswVectorsFormat(int maxConn, int beamWidth) {
         this(maxConn, beamWidth, configuredMergeWorkers());
     }
 
     public PaimonHnswVectorsFormat(int maxConn, int beamWidth, int mergeWorkers) {
+        this(maxConn, beamWidth, mergeWorkers, null);
+    }
+
+    public PaimonHnswVectorsFormat(
+            int maxConn,
+            int beamWidth,
+            int mergeWorkers,
+            ExecutorService mergeExecutor) {
         this(
             new Lucene99HnswVectorsFormat(
                 maxConn,
                 beamWidth,
                 validateMergeWorkers(mergeWorkers),
-                null),
-            mergeWorkers);
+                mergeExecutor),
+            mergeWorkers,
+            mergeExecutor != null);
     }
 
     private PaimonHnswVectorsFormat(
-            Lucene99HnswVectorsFormat delegate, int mergeWorkers) {
+            Lucene99HnswVectorsFormat delegate,
+            int mergeWorkers,
+            boolean explicitMergeExecutor) {
         super(LUCENE99_HNSW_FORMAT_NAME);
         this.delegate = delegate;
         this.mergeWorkers = mergeWorkers;
+        this.explicitMergeExecutor = explicitMergeExecutor;
     }
 
     public static int configuredMergeWorkers() {
@@ -102,6 +124,7 @@ public final class PaimonHnswVectorsFormat extends KnnVectorsFormat {
     public String toString() {
         return "PaimonHnswVectorsFormat(delegate=" + delegate
             + ", mergeWorkers=" + mergeWorkers
+            + ", explicitMergeExecutor=" + explicitMergeExecutor
             + ", maxDimensions=" + MAX_DIMENSIONS + ")";
     }
 }

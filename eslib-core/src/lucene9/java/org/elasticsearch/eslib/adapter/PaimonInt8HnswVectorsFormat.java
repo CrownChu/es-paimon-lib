@@ -5,6 +5,7 @@
 package org.elasticsearch.eslib.adapter;
 
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.KnnVectorsWriter;
@@ -19,6 +20,7 @@ public final class PaimonInt8HnswVectorsFormat extends KnnVectorsFormat {
 
     private final Lucene99HnswScalarQuantizedVectorsFormat delegate;
     private final int mergeWorkers;
+    private final boolean explicitMergeExecutor;
 
     public PaimonInt8HnswVectorsFormat() {
         this(16, 100);
@@ -28,9 +30,22 @@ public final class PaimonInt8HnswVectorsFormat extends KnnVectorsFormat {
         this(maxConn, beamWidth, PaimonHnswVectorsFormat.configuredMergeWorkers());
     }
 
+    public PaimonInt8HnswVectorsFormat(ExecutorService mergeExecutor) {
+        this(16, 100, PaimonHnswVectorsFormat.configuredMergeWorkers(), mergeExecutor);
+    }
+
     public PaimonInt8HnswVectorsFormat(int maxConn, int beamWidth, int mergeWorkers) {
+        this(maxConn, beamWidth, mergeWorkers, null);
+    }
+
+    public PaimonInt8HnswVectorsFormat(
+            int maxConn,
+            int beamWidth,
+            int mergeWorkers,
+            ExecutorService mergeExecutor) {
         super(Lucene99HnswScalarQuantizedVectorsFormat.NAME);
         this.mergeWorkers = PaimonHnswVectorsFormat.validateMergeWorkers(mergeWorkers);
+        this.explicitMergeExecutor = mergeExecutor != null;
         this.delegate =
                 new Lucene99HnswScalarQuantizedVectorsFormat(
                         maxConn,
@@ -39,7 +54,7 @@ public final class PaimonInt8HnswVectorsFormat extends KnnVectorsFormat {
                         INT8_BITS,
                         false,
                         null,
-                        null);
+                        mergeExecutor);
     }
 
     @Override
@@ -63,6 +78,8 @@ public final class PaimonInt8HnswVectorsFormat extends KnnVectorsFormat {
                 + delegate
                 + ", mergeWorkers="
                 + mergeWorkers
+                + ", explicitMergeExecutor="
+                + explicitMergeExecutor
                 + ", maxDimensions="
                 + PaimonHnswVectorsFormat.MAX_DIMENSIONS
                 + ")";

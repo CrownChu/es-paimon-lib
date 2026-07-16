@@ -22,7 +22,7 @@ public class PaimonLucene9Codec extends FilterCodec {
 
     /** No-arg constructor required by Lucene SPI (Codec.forName). Picks up executor from ThreadLocal. */
     public PaimonLucene9Codec() {
-        this(Collections.emptyMap(), Collections.emptyMap(), SearchExecutorHolder.get());
+        this(Collections.emptyMap(), Collections.emptyMap(), SearchExecutorHolder.get(), null);
     }
 
     public PaimonLucene9Codec(Map<String, FieldIndexConfig> fieldConfigs) {
@@ -44,8 +44,18 @@ public class PaimonLucene9Codec extends FilterCodec {
     public PaimonLucene9Codec(Map<String, FieldIndexConfig> fieldConfigs,
                                 Map<String, KnnVectorsFormat> overrideFormats,
                                 ExecutorService searchExecutor) {
+        this(fieldConfigs, overrideFormats, searchExecutor, null);
+    }
+
+    public PaimonLucene9Codec(
+            Map<String, FieldIndexConfig> fieldConfigs,
+            Map<String, KnnVectorsFormat> overrideFormats,
+            ExecutorService searchExecutor,
+            ExecutorService mergeExecutor) {
         super("PaimonLucene9", new Lucene912Codec());
-        this.knnFormat = new PaimonPerFieldKnnVectorsFormat912(fieldConfigs, overrideFormats, searchExecutor);
+        this.knnFormat =
+                new PaimonPerFieldKnnVectorsFormat912(
+                        fieldConfigs, overrideFormats, searchExecutor, mergeExecutor);
     }
 
     @Override
@@ -61,13 +71,16 @@ public class PaimonLucene9Codec extends FilterCodec {
         private final Map<String, FieldIndexConfig> fieldConfigs;
         private final Map<String, KnnVectorsFormat> overrideFormats;
         private final ExecutorService searchExecutor;
+        private final ExecutorService mergeExecutor;
 
         PaimonPerFieldKnnVectorsFormat912(Map<String, FieldIndexConfig> fieldConfigs,
                                          Map<String, KnnVectorsFormat> overrideFormats,
-                                         ExecutorService searchExecutor) {
+                                         ExecutorService searchExecutor,
+                                         ExecutorService mergeExecutor) {
             this.fieldConfigs = fieldConfigs;
             this.overrideFormats = overrideFormats;
             this.searchExecutor = searchExecutor;
+            this.mergeExecutor = mergeExecutor;
             if (LOG_PFKVF.isDebugEnabled()) {
                 LOG_PFKVF.debug(
                     "[codec] PaimonPerFieldKnnVectorsFormat912 ctor; fieldConfigs.keys={}, overrideFormats.keys={}",
@@ -83,7 +96,7 @@ public class PaimonLucene9Codec extends FilterCodec {
                     config,
                     (config == null ? "null-config" : String.valueOf(config.getAlgorithm())));
             if (config == null || config.getAlgorithm() == null) {
-                return new PaimonHnswVectorsFormat();
+                return new PaimonHnswVectorsFormat(mergeExecutor);
             }
             VectorAlgorithm algorithm = config.getAlgorithm();
             switch (algorithm) {
@@ -100,11 +113,19 @@ public class PaimonLucene9Codec extends FilterCodec {
                 case HNSW:
                     int m = config.getIntParam("m", 16);
                     int efConstruction = config.getIntParam("ef_construction", 100);
-                    return new PaimonHnswVectorsFormat(m, efConstruction);
+                    return new PaimonHnswVectorsFormat(
+                            m,
+                            efConstruction,
+                            PaimonHnswVectorsFormat.configuredMergeWorkers(),
+                            mergeExecutor);
                 case INT8_HNSW:
                     int int8M = config.getIntParam("m", 16);
                     int int8EfConstruction = config.getIntParam("ef_construction", 100);
-                    return new PaimonInt8HnswVectorsFormat(int8M, int8EfConstruction);
+                    return new PaimonInt8HnswVectorsFormat(
+                            int8M,
+                            int8EfConstruction,
+                            PaimonHnswVectorsFormat.configuredMergeWorkers(),
+                            mergeExecutor);
                 case NATIVE:
                     KnnVectorsFormat nativeFormat = overrideFormats.get("NATIVE");
                     if (nativeFormat != null) {
@@ -115,7 +136,7 @@ public class PaimonLucene9Codec extends FilterCodec {
                             + "and pass the format via overrideFormats."
                     );
                 default:
-                    return new PaimonHnswVectorsFormat();
+                    return new PaimonHnswVectorsFormat(mergeExecutor);
             }
         }
     }

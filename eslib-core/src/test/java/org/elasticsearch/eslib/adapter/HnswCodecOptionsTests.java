@@ -9,6 +9,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -58,6 +60,54 @@ class HnswCodecOptionsTests {
             assertInstanceOf(PaimonHnswVectorsFormat.class, format);
             assertTrue(format.toString().contains("mergeWorkers=4"), format.toString());
         } finally {
+            restoreSystemProperty(
+                    PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, previous);
+        }
+    }
+
+    @Test
+    void buildCodecPassesExplicitMergeExecutorToFloatAndInt8Hnsw() throws Exception {
+        String previous = System.getProperty(PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY);
+        ExecutorService mergeExecutor = Executors.newFixedThreadPool(3);
+        try {
+            System.setProperty(PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, "4");
+            FieldIndexConfig floatConfig =
+                    FieldIndexConfig.builder("float_emb", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(VectorAlgorithm.HNSW)
+                            .dimension(32)
+                            .metric("dot_product")
+                            .build();
+            FieldIndexConfig int8Config =
+                    FieldIndexConfig.builder("int8_emb", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(VectorAlgorithm.INT8_HNSW)
+                            .dimension(32)
+                            .metric("dot_product")
+                            .build();
+
+            Codec codec =
+                    LuceneAdapterFactory.get()
+                            .createCodecForBuild(
+                                    Map.of(
+                                            "float_emb", floatConfig,
+                                            "int8_emb", int8Config),
+                                    mergeExecutor);
+            PerFieldKnnVectorsFormat perField =
+                    (PerFieldKnnVectorsFormat) codec.knnVectorsFormat();
+
+            KnnVectorsFormat floatFormat =
+                    perField.getKnnVectorsFormatForField("float_emb");
+            KnnVectorsFormat int8Format =
+                    perField.getKnnVectorsFormatForField("int8_emb");
+            assertInstanceOf(PaimonHnswVectorsFormat.class, floatFormat);
+            assertInstanceOf(PaimonInt8HnswVectorsFormat.class, int8Format);
+            assertTrue(
+                    floatFormat.toString().contains("explicitMergeExecutor=true"),
+                    floatFormat.toString());
+            assertTrue(
+                    int8Format.toString().contains("explicitMergeExecutor=true"),
+                    int8Format.toString());
+        } finally {
+            mergeExecutor.shutdownNow();
             restoreSystemProperty(
                     PaimonHnswVectorsFormat.MERGE_WORKERS_PROPERTY, previous);
         }

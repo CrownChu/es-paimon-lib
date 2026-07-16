@@ -8,6 +8,7 @@ import org.elasticsearch.eslib.adapter.LuceneAdapter;
 import org.elasticsearch.eslib.api.model.FieldIndexConfig;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 
@@ -32,6 +33,19 @@ public class Lucene9Adapter implements LuceneAdapter {
                 searchExecutor != null,
                 callerStackTop(5));
         return new PaimonLucene9Codec(fieldConfigs, searchExecutor);
+    }
+
+    @Override
+    public Codec createCodecForBuild(
+            Map<String, FieldIndexConfig> fieldConfigs, ExecutorService mergeExecutor) {
+        LOG.info(
+                "[adapter.createCodecForBuild] called — fieldConfigs.keys={}, "
+                        + "perFieldDetail={}, mergeExecutor!=null={}",
+                fieldConfigs == null ? "null" : fieldConfigs.keySet(),
+                describeFieldConfigs(fieldConfigs),
+                mergeExecutor != null);
+        return new PaimonLucene9Codec(
+                fieldConfigs, Collections.emptyMap(), null, mergeExecutor);
     }
 
     private static String describeFieldConfigs(Map<String, FieldIndexConfig> fieldConfigs) {

@@ -49,17 +49,26 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class DefaultESIndexBuilder implements ESIndexBuilder {
 
     private static final Logger LOG = LoggerFactory.getLogger(DefaultESIndexBuilder.class);
     private static final long FORCE_MERGE_HEARTBEAT_MILLIS = 60_000L;
+    private static final long MERGE_EXECUTOR_SHUTDOWN_SECONDS = 30L;
 
     private final Map<String, FieldIndexConfig> fieldConfigs;
     private final Path outputDir;
     private final String buildId;
     private final boolean hnswBuild;
+    private final int hnswMergeWorkers;
+    private final int hnswMergeBackgroundThreads;
+    private final ExecutorService hnswMergeExecutor;
     private final IndexWriter writer;
     private final Directory directory;
     private final Map<String, Analyzer> fieldAnalyzers;
@@ -137,6 +146,13 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
         this.hnswBuild = this.fieldConfigs.values().stream()
             .anyMatch(config -> config.algorithm() == VectorAlgorithm.HNSW
                 || config.algorithm() == VectorAlgorithm.INT8_HNSW);
+        this.hnswMergeWorkers = hnswBuild
+            ? PaimonHnswVectorsFormat.configuredMergeWorkers()
+            : PaimonHnswVectorsFormat.DEFAULT_MERGE_WORKERS;
+        // Lucene's TaskExecutor runs one worker on the calling merge thread and submits the
+        // remaining workers to this pool. Creating mergeWorkers threads would therefore
+        // over-subscribe each Spark task by one CPU.
+        this.hnswMergeBackgroundThreads = hnswBuild ? Math.max(0, hnswMergeWorkers - 1) : 0;
         this.pendingDocs = new HashMap<>();
         this.normalizeVectors = Boolean.parseBoolean(System.getProperty(NORMALIZE_VECTOR_PROP, "false"));
         if (normalizeVectors) {
@@ -148,6 +164,7 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
         Analyzer candidateIndexAnalyzer = null;
         Directory candidateDirectory = null;
         IndexWriter candidateWriter = null;
+        ExecutorService candidateHnswMergeExecutor = null;
         try {
             for (Map.Entry<String, FieldIndexConfig> entry : this.fieldConfigs.entrySet()) {
                 if (entry.getValue().indexType() == FieldIndexConfig.IndexType.FULLTEXT) {
@@ -156,8 +173,12 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
                 }
             }
 
+            candidateHnswMergeExecutor =
+                    createHnswMergeExecutor(buildId, hnswMergeBackgroundThreads);
             LuceneAdapter adapter = LuceneAdapterFactory.get();
-            Codec codec = adapter.createCodec(this.fieldConfigs);
+            Codec codec =
+                    adapter.createCodecForBuild(
+                            this.fieldConfigs, candidateHnswMergeExecutor);
 
             // Use the per-field configured analyzer at write time so it matches the analyzer the
             // searcher applies at query time. Fields without a configured analyzer (and all non-
@@ -198,6 +219,7 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
             candidateDirectory = FSDirectory.open(outputDir);
             candidateWriter = new IndexWriter(candidateDirectory, iwc);
         } catch (IOException | RuntimeException | Error failure) {
+            shutdownNowOnConstructionFailure(candidateHnswMergeExecutor, failure);
             closeOnConstructionFailure(
                     failure,
                     candidateWriter,
@@ -219,16 +241,53 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
         this.indexAnalyzer = candidateIndexAnalyzer;
         this.directory = candidateDirectory;
         this.writer = candidateWriter;
+        this.hnswMergeExecutor = candidateHnswMergeExecutor;
         if (hnswBuild) {
             LOG.info(
                 "ESLIB_HNSW event=builder_created buildId={} fields={} mergeWorkers={} "
-                    + "ramBufferMiB={} availableProcessors={} outputDir={}",
+                    + "mergeBackgroundThreads={} explicitMergeExecutor={} ramBufferMiB={} "
+                    + "availableProcessors={} outputDir={}",
                 buildId,
                 this.fieldConfigs.keySet(),
-                PaimonHnswVectorsFormat.configuredMergeWorkers(),
+                hnswMergeWorkers,
+                hnswMergeBackgroundThreads,
+                hnswMergeExecutor != null,
                 this.writer.getConfig().getRAMBufferSizeMB(),
                 Runtime.getRuntime().availableProcessors(),
                 outputDir);
+        }
+    }
+
+    private static ExecutorService createHnswMergeExecutor(
+            String buildId, int backgroundThreads) {
+        if (backgroundThreads <= 0) {
+            return null;
+        }
+        AtomicInteger threadNumber = new AtomicInteger();
+        ThreadFactory threadFactory =
+                runnable -> {
+                    Thread thread =
+                            new Thread(
+                                    runnable,
+                                    "eslib-hnsw-merge-"
+                                            + buildId
+                                            + "-"
+                                            + threadNumber.incrementAndGet());
+                    thread.setDaemon(true);
+                    return thread;
+                };
+        return Executors.newFixedThreadPool(backgroundThreads, threadFactory);
+    }
+
+    private static void shutdownNowOnConstructionFailure(
+            ExecutorService executor, Throwable failure) {
+        if (executor == null) {
+            return;
+        }
+        try {
+            executor.shutdownNow();
+        } catch (Throwable cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
         }
     }
 
@@ -482,11 +541,14 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
             IndexWriter.DocStats stats = writer.getDocStats();
             LOG.info(
                 "ESLIB_HNSW event=force_merge_start buildId={} numDocs={} maxDoc={} "
-                    + "mergeWorkers={} heapUsedMiB={}",
+                    + "mergeWorkers={} mergeBackgroundThreads={} explicitMergeExecutor={} "
+                    + "heapUsedMiB={}",
                 buildId,
                 stats.numDocs,
                 stats.maxDoc,
-                PaimonHnswVectorsFormat.configuredMergeWorkers(),
+                hnswMergeWorkers,
+                hnswMergeBackgroundThreads,
+                hnswMergeExecutor != null,
                 heapUsedMiB());
         }
         ForceMergeHeartbeat heartbeat = hnswBuild ? startForceMergeHeartbeat(mergeStartNanos) : null;
@@ -522,7 +584,11 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
         }
         LOG.debug("[build] forceMerge(1) done in {}ms; writer.numDocs={}", mergeMs, numDocs);
         long closeStartNanos = System.nanoTime();
-        writer.close();
+        try {
+            writer.close();
+        } finally {
+            shutdownHnswMergeExecutor();
+        }
         built = true;
         if (hnswBuild) {
             DirectoryStats directoryStats = directoryStats();
@@ -730,8 +796,57 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
         resources.addAll(fieldAnalyzers.values());
         resources.add(defaultAnalyzer);
         resources.add(directory);
-        IOUtils.close(resources);
-        closed = true;
+        try {
+            IOUtils.close(resources);
+        } finally {
+            shutdownHnswMergeExecutor();
+            closed = true;
+        }
+    }
+
+    private void shutdownHnswMergeExecutor() {
+        if (hnswMergeExecutor == null || hnswMergeExecutor.isTerminated()) {
+            return;
+        }
+        hnswMergeExecutor.shutdown();
+        boolean interrupted = false;
+        try {
+            if (!hnswMergeExecutor.awaitTermination(
+                    MERGE_EXECUTOR_SHUTDOWN_SECONDS, TimeUnit.SECONDS)) {
+                List<Runnable> cancelled = hnswMergeExecutor.shutdownNow();
+                LOG.warn(
+                        "ESLIB_HNSW event=merge_executor_forced_shutdown buildId={} "
+                            + "cancelledTasks={}",
+                        buildId,
+                        cancelled.size());
+            }
+        } catch (InterruptedException e) {
+            interrupted = true;
+            hnswMergeExecutor.shutdownNow();
+            LOG.warn(
+                    "ESLIB_HNSW event=merge_executor_shutdown_interrupted buildId={}",
+                    buildId);
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    int hnswMergeWorkers() {
+        return hnswMergeWorkers;
+    }
+
+    int hnswMergeBackgroundThreads() {
+        return hnswMergeBackgroundThreads;
+    }
+
+    boolean hnswMergeExecutorEnabled() {
+        return hnswMergeExecutor != null;
+    }
+
+    boolean hnswMergeExecutorShutdown() {
+        return hnswMergeExecutor == null || hnswMergeExecutor.isShutdown();
     }
 
     @Override
