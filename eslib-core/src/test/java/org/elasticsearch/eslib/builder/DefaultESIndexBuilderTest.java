@@ -212,6 +212,40 @@ class DefaultESIndexBuilderTest {
     }
 
     @Test
+    void int8HnswBuildsAndSearchesScalarQuantizedVectors() throws Exception {
+        int dimension = 32;
+        int vectorCount = 200;
+        Map<String, FieldIndexConfig> configs = new HashMap<>();
+        configs.put(
+                "vector",
+                FieldIndexConfig.builder("vector", FieldIndexConfig.IndexType.VECTOR)
+                        .algorithm(VectorAlgorithm.INT8_HNSW)
+                        .dimension(dimension)
+                        .metric("dot_product")
+                        .algorithmParams(Map.of("m", "16", "ef_construction", "64"))
+                        .build());
+
+        float[][] vectors = normalizedVectors(vectorCount, dimension);
+        Path indexDir = tempDir.resolve("int8-hnsw-index");
+        Files.createDirectories(indexDir);
+        try (DefaultESIndexBuilder builder = new DefaultESIndexBuilder(configs, indexDir)) {
+            for (int i = 0; i < vectors.length; i++) {
+                builder.addVector("vector", i, vectors[i]);
+            }
+            builder.build();
+        }
+
+        try (Directory directory = FSDirectory.open(indexDir);
+                DirectoryReader reader = DirectoryReader.open(directory)) {
+            TopDocs hits =
+                    new IndexSearcher(reader)
+                            .search(new KnnFloatVectorQuery("vector", vectors[0], 10), 10);
+            assertTrue(hits.scoreDocs.length > 0);
+            assertTrue(Float.isFinite(hits.scoreDocs[0].score));
+        }
+    }
+
+    @Test
     void diskBBQForceMergeReadsVectorsFromMultipleSegments() throws Exception {
         int dimension = 32;
         int vectorCount = 1_000;

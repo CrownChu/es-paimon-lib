@@ -7,6 +7,7 @@ import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.lucene104.Lucene104Codec;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
 import org.elasticsearch.eslib.adapter.PaimonHnswVectorsFormat;
+import org.elasticsearch.eslib.adapter.PaimonInt8HnswVectorsFormat;
 import org.elasticsearch.eslib.api.model.FieldIndexConfig;
 import org.elasticsearch.eslib.api.model.VectorAlgorithm;
 import org.elasticsearch.eslib.diskbbq.PaimonDiskBBQVectorsFormat;
@@ -63,6 +64,10 @@ public class PaimonLucene10Codec extends FilterCodec {
                     int m = config.getIntParam("m", 16);
                     int efConstruction = config.getIntParam("ef_construction", 100);
                     return new PaimonHnswVectorsFormat(m, efConstruction);
+                case INT8_HNSW:
+                    int int8M = config.getIntParam("m", 16);
+                    int int8EfConstruction = config.getIntParam("ef_construction", 100);
+                    return new PaimonInt8HnswVectorsFormat(int8M, int8EfConstruction);
                 case NATIVE:
                     throw new UnsupportedOperationException(
                             "Native vector format requires eslib-native module");

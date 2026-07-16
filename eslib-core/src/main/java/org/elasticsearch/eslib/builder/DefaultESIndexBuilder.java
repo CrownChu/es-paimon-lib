@@ -135,7 +135,8 @@ public class DefaultESIndexBuilder implements ESIndexBuilder {
             ? outputDir.toString()
             : outputDir.getFileName().toString();
         this.hnswBuild = this.fieldConfigs.values().stream()
-            .anyMatch(config -> config.algorithm() == VectorAlgorithm.HNSW);
+            .anyMatch(config -> config.algorithm() == VectorAlgorithm.HNSW
+                || config.algorithm() == VectorAlgorithm.INT8_HNSW);
         this.pendingDocs = new HashMap<>();
         this.normalizeVectors = Boolean.parseBoolean(System.getProperty(NORMALIZE_VECTOR_PROP, "false"));
         if (normalizeVectors) {

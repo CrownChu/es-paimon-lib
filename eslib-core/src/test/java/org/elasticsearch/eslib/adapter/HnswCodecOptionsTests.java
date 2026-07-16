@@ -64,6 +64,26 @@ class HnswCodecOptionsTests {
     }
 
     @Test
+    void configuredParametersReachLuceneInt8HnswFormat() throws Exception {
+        FieldIndexConfig config =
+                FieldIndexConfig.builder("emb", FieldIndexConfig.IndexType.VECTOR)
+                        .algorithm(VectorAlgorithm.INT8_HNSW)
+                        .dimension(768)
+                        .metric("dot_product")
+                        .algorithmParams(Map.of("m", "24", "ef_construction", "160"))
+                        .build();
+
+        Codec codec = createProfileCodec(Map.of("emb", config));
+        PerFieldKnnVectorsFormat perField =
+                (PerFieldKnnVectorsFormat) codec.knnVectorsFormat();
+        KnnVectorsFormat format = perField.getKnnVectorsFormatForField("emb");
+
+        assertInstanceOf(PaimonInt8HnswVectorsFormat.class, format);
+        assertTrue(format.toString().contains("maxConn=24"), format.toString());
+        assertTrue(format.toString().contains("beamWidth=160"), format.toString());
+    }
+
+    @Test
     void rejectsInvalidMergeWorkerCount() {
         assertThrows(
                 IllegalArgumentException.class,

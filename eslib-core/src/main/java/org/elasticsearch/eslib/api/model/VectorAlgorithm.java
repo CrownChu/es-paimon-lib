@@ -15,6 +15,9 @@ public enum VectorAlgorithm {
     /** Standard Lucene HNSW. General purpose, moderate scale. */
     HNSW("hnsw"),
 
+    /** Lucene HNSW backed by scalar-quantized vectors (int8 storage). */
+    INT8_HNSW("int8_hnsw"),
+
     /**
      * Havenask proxima native engine (JNI to C++ library).
      * Supports multiple sub-algorithms via builder_name parameter:
@@ -40,6 +43,6 @@ public enum VectorAlgorithm {
             }
         }
         throw new IllegalArgumentException("Unknown vector algorithm: " + name
-                + ". Supported: diskbbq, hnsw, native");
+                + ". Supported: diskbbq, hnsw, int8_hnsw, native");
     }
 }

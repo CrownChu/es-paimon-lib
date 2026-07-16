@@ -74,7 +74,7 @@ public final class PaimonHnswVectorsFormat extends KnnVectorsFormat {
         return validateMergeWorkers(workers);
     }
 
-    private static int validateMergeWorkers(int mergeWorkers) {
+    static int validateMergeWorkers(int mergeWorkers) {
         if (mergeWorkers < 1 || mergeWorkers > MAX_MERGE_WORKERS) {
             throw new IllegalArgumentException(
                 "HNSW merge workers must be between 1 and " + MAX_MERGE_WORKERS
