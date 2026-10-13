@@ -1,0 +1,34 @@
+def nativeBundle = providers.gradleProperty('nativeBundleDir')
+
+tasks.register('verifyNativeBundle', Exec) {
+    group = 'verification'
+    description = 'Validates immutable native provenance, ELF identity, exports and dependency closure.'
+    doFirst {
+        if (!nativeBundle.isPresent()) {
+            throw new GradleException('nativeBundleDir is required for the real native runtime package')
+        }
+        commandLine 'python3', rootProject.file('tools/verify_native_bundle.py'), nativeBundle.get()
+    }
+}
+
+tasks.named('jar') {
+    dependsOn tasks.named('verifyNativeBundle')
+    from(provider {
+        if (!nativeBundle.isPresent()) {
+            throw new GradleException('Cannot build an empty native runtime JAR')
+        }
+        file(nativeBundle.get())
+    }) {
+        into 'META-INF/native/linux-x86_64'
+        include '*.so', '*.so.*', 'native-manifest.json'
+    }
+}
+
+tasks.withType(PublishToMavenRepository).configureEach {
+    dependsOn tasks.named('verifyNativeBundle')
+    dependsOn ':eslib-native:test', ':eslib-native:nativeIntegrationTest'
+}
+tasks.withType(PublishToMavenLocal).configureEach {
+    dependsOn tasks.named('verifyNativeBundle')
+    dependsOn ':eslib-native:test', ':eslib-native:nativeIntegrationTest'
+}

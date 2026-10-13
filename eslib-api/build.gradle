@@ -1,0 +1,2 @@
+// Public types are shared by both Java Lucene lines and the native backend.
+// They retain Java 11 bytecode and have no Lucene or native runtime dependency.
