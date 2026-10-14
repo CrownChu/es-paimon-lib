@@ -116,6 +116,12 @@ final class NativeClient {
             for (int i = 0; i < items.length; i++) {
                 Memory value = bytes(documents.get(i));
                 owned.add(value);
+                // JNA toArray auto-reads subsequent structures from zeroed
+                // contiguous storage, replacing their field initializers.
+                items[i].abiVersion = 1;
+                items[i].mappingGeneration = 1;
+                items[i].ifSequenceNumber = -2;
+                items[i].ifPrimaryTerm = 0;
                 items[i].documentId = Math.addExact(firstRow, i);
                 items[i].source = value;
                 items[i].sourceLength = documents.get(i).length;
