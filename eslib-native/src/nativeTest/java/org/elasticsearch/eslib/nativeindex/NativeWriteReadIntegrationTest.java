@@ -14,6 +14,7 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.store.FSDirectory;
 import org.elasticsearch.eslib.api.ArchiveDataProvider;
+import org.elasticsearch.eslib.api.model.BuiltinAnalyzer;
 import org.elasticsearch.eslib.api.model.FieldIndexConfig;
 import org.elasticsearch.eslib.api.model.IndexFilter;
 import org.elasticsearch.eslib.api.model.ScalarFieldType;
@@ -33,6 +34,70 @@ import java.util.Map;
 
 /** Real C++ calls are mandatory. Missing native assets fail rather than skip these tests. */
 class NativeWriteReadIntegrationTest {
+    @Test
+    void nativeIkSmartAndMaxWordPreserveDictionaryIdentityAndTokenModes() throws Exception {
+        // The test-only dictionary contains one long lexeme and its three
+        // overlapping components. IK smart keeps the longest lexeme; max-word
+        // preserves the overlapping lexemes. Java Lucene independently reads
+        // every emitted term in addition to the actual native query checks.
+        Map<String, FieldIndexConfig> fields = new LinkedHashMap<>();
+        fields.put(
+                "smart",
+                FieldIndexConfig.builder("smart", FieldIndexConfig.IndexType.FULLTEXT)
+                        .analyzer(BuiltinAnalyzer.IK_SMART)
+                        .build());
+        fields.put(
+                "max",
+                FieldIndexConfig.builder("max", FieldIndexConfig.IndexType.FULLTEXT)
+                        .analyzer(BuiltinAnalyzer.IK_MAX_WORD)
+                        .build());
+        Path output;
+        try (NativeESIndexBuilder builder = new NativeESIndexBuilder(fields)) {
+            builder.addTextField("smart", 0, "中华人民共和国");
+            builder.addTextField("max", 0, "中华人民共和国");
+            builder.finishDocument(0);
+            builder.addTextField("smart", 1, "人民");
+            builder.addTextField("max", 1, "人民");
+            builder.finishDocument(1);
+            builder.addNullDoc(2);
+            builder.finishDocument(2);
+            builder.build();
+            output = builder.getOutputDir();
+        }
+        checkJavaLucene(output, 3);
+        try (FSDirectory directory = FSDirectory.open(output);
+                DirectoryReader reader = DirectoryReader.open(directory)) {
+            assertEquals(
+                    new java.util.TreeSet<>(Arrays.asList("中华人民共和国", "人民")),
+                    terms(reader, "smart"));
+            assertEquals(
+                    new java.util.TreeSet<>(Arrays.asList("中华人民共和国", "中华", "人民", "共和国")),
+                    terms(reader, "max"));
+        }
+        Archive archive = new Archive(output);
+        try (NativeESIndexSearcher searcher = new NativeESIndexSearcher()) {
+            searcher.load(archive, archive.offsets, fields);
+            assertArrayEquals(new long[0], searcher.fullTextSearch("smart", "中华", 10).ids);
+            assertArrayEquals(new long[] {0}, searcher.fullTextSearch("max", "中华", 10).ids);
+            assertArrayEquals(new long[] {1}, searcher.fullTextSearch("smart", "人民", 10).ids);
+            long[] maxHits = searcher.fullTextSearch("max", "人民", 10).ids;
+            Arrays.sort(maxHits);
+            assertArrayEquals(new long[] {0, 1}, maxHits);
+            assertArrayEquals(new long[] {2}, searcher.filter("smart", IndexFilter.notExists()));
+        }
+        assertTrue(archive.closed);
+    }
+
+    private static java.util.Set<String> terms(DirectoryReader reader, String field)
+            throws IOException {
+        java.util.Set<String> values = new java.util.TreeSet<>();
+        org.apache.lucene.index.TermsEnum terms =
+                org.apache.lucene.index.MultiTerms.getTerms(reader, field).iterator();
+        org.apache.lucene.util.BytesRef value;
+        while ((value = terms.next()) != null) values.add(value.utf8ToString());
+        return values;
+    }
+
     @Test
     void nativeScalarAndTextWithHolesMatchesIndependentLuceneReader() throws Exception {
         Map<String, FieldIndexConfig> fields = new LinkedHashMap<>();

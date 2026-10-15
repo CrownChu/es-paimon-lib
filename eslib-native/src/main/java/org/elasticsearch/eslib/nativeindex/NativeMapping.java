@@ -16,10 +16,20 @@ final class NativeMapping {
     final byte[] mapping, config;
 
     NativeMapping(Map<String, FieldIndexConfig> source) throws IOException {
+        this(source, NativeIkDictionary.selected(source));
+    }
+
+    NativeMapping(Map<String, FieldIndexConfig> source, NativeIkDictionary dictionary)
+            throws IOException {
         if (source == null || source.isEmpty() || source.size() > 1024)
             throw new IllegalArgumentException("Native fields must contain 1..1024 entries");
         Map<String, FieldIndexConfig> selected = new TreeMap<>(NativeJson.UTF8_ORDER);
         Map<String, Object> properties = NativeJson.object(), configs = NativeJson.object();
+        if (NativeIkDictionary.required(source)) {
+            if (dictionary == null)
+                throw new IOException("Native IK dictionary identity is missing");
+            configs.put("__native_ik_dictionary", dictionary.files);
+        }
         for (Map.Entry<String, FieldIndexConfig> entry : source.entrySet()) {
             String name = entry.getKey();
             FieldIndexConfig field = entry.getValue();
@@ -95,8 +105,6 @@ final class NativeMapping {
             case FULLTEXT:
                 BuiltinAnalyzer analyzer =
                         field.analyzer() == null ? BuiltinAnalyzer.STANDARD : field.analyzer();
-                if (analyzer == BuiltinAnalyzer.IK_SMART || analyzer == BuiltinAnalyzer.IK_MAX_WORD)
-                    throw unsupported("Native IK analyzer is not part of this bundle");
                 return NativeJson.object("analyzer", analyzer.getName(), "type", "text");
             case KEYWORD:
                 return NativeJson.object("type", "keyword");

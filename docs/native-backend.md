@@ -32,6 +32,16 @@ date, text and float HNSW fields to the existing native writer/query ABI. HNSW
 dimensions are limited to 1–1024. Null rows and holes occupy dense document slots;
 `finishDocument` allows bounded native batches for rows supplied in order.
 
+IK smart and max-word mappings use elasticpp's existing IK implementation.
+Before starting the JVM, set `ES_PATH_CONF` to a configuration directory with
+`analysis-ik/main.dic`, `analysis-ik/quantifier.dic` and
+`analysis-ik/stopword.dic`. Keep these files immutable for the process lifetime.
+Their SHA-256 digests become part of the archive's field-configuration identity;
+the reader must use identical dictionary contents, even on another machine.
+Changing dictionaries requires a fresh process and rebuilding the affected
+index. Production dictionaries remain external; the small integration-test
+dictionary is used only by the test task.
+
 The searcher owns its `ArchiveDataProvider`. It reads the archive manifest and
 copies sealed files through 256 KiB range reads into a private local directory,
 validating each file's length and SHA-256. C++ opens the resulting index and
@@ -45,8 +55,8 @@ that descriptor and are not accepted by this candidate.
 
 The following limits remain explicit:
 
-- INT8_HNSW, DiskBBQ, Proxima's `VectorAlgorithm.NATIVE`, custom HNSW parameters
-  and IK analyzers are rejected. The new backend's float HNSW uses the existing
+- INT8_HNSW, DiskBBQ, Proxima's `VectorAlgorithm.NATIVE` and custom HNSW parameters
+  are rejected. The new backend's float HNSW uses the existing
   `VectorAlgorithm.HNSW` enum value.
 - GEO filters, fuzzy/regexp/wildcard filters and nonzero match fuzziness are rejected.
 - Repeated values for one field in a row are rejected pending multi-value compatibility.
@@ -89,7 +99,9 @@ JAVA_HOME=/path/to/jdk-21 ./gradlew \
 The integration tests call the real C++ writer and reader. They independently
 run Java Lucene `CheckIndex`, check every native row document value, exercise
 null holes and long values above 2^53, and compare vector results and scores with
-squared-L2 arithmetic. Missing native assets fail the tests rather than skip them.
+squared-L2 arithmetic. An additional IK test checks smart/max-word token sets
+with an independent Java Lucene reader and executes native queries after archive
+reopening. Missing native assets fail the tests rather than skip them.
 
 ## Publication order
 

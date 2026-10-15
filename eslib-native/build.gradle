@@ -58,6 +58,8 @@ tasks.register('nativeIntegrationTest', Test) {
     testClassesDirs = sourceSets.nativeIntegrationTest.output.classesDirs
     classpath = sourceSets.nativeIntegrationTest.runtimeClasspath
     useJUnitPlatform()
+    environment 'ES_PATH_CONF', file('src/nativeTest/resources/ik-config').absolutePath
+    inputs.dir file('src/nativeTest/resources/ik-config')
     shouldRunAfter tasks.named('test')
 }
 
