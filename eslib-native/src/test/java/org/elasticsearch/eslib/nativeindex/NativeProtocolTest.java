@@ -93,10 +93,7 @@ class NativeProtocolTest {
 
     @Test
     void unsupportedAlgorithmNeverChangesToFloatHnsw() {
-        for (VectorAlgorithm algorithm :
-                new VectorAlgorithm[] {
-                    VectorAlgorithm.INT8_HNSW, VectorAlgorithm.DISKBBQ, VectorAlgorithm.NATIVE
-                }) {
+        for (VectorAlgorithm algorithm : new VectorAlgorithm[] {VectorAlgorithm.NATIVE}) {
             FieldIndexConfig field =
                     FieldIndexConfig.builder("v", FieldIndexConfig.IndexType.VECTOR)
                             .algorithm(algorithm)
@@ -105,6 +102,40 @@ class NativeProtocolTest {
             assertThrows(
                     UnsupportedOperationException.class,
                     () -> new NativeMapping(Collections.singletonMap("v", field)));
+        }
+    }
+
+    @Test
+    void quantizedAlgorithmsKeepDistinctPhysicalFormatsAndArchiveIdentities() throws Exception {
+        byte[] previous = null;
+        for (VectorAlgorithm algorithm :
+                new VectorAlgorithm[] {
+                    VectorAlgorithm.HNSW, VectorAlgorithm.INT8_HNSW, VectorAlgorithm.DISKBBQ
+                }) {
+            FieldIndexConfig field =
+                    FieldIndexConfig.builder("v", FieldIndexConfig.IndexType.VECTOR)
+                            .algorithm(algorithm)
+                            .dimension(33)
+                            .metric("l2")
+                            .build();
+            NativeMapping mapping = new NativeMapping(Collections.singletonMap("v", field));
+            String expected =
+                    algorithm == VectorAlgorithm.HNSW
+                            ? "hnsw"
+                            : algorithm == VectorAlgorithm.INT8_HNSW ? "int8_hnsw" : "bbq_disk";
+            assertEquals(
+                    expected,
+                    NativeJson.parse(mapping.mapping)
+                            .path("properties")
+                            .path("v")
+                            .path("index_options")
+                            .path("type")
+                            .asText());
+            assertEquals(
+                    algorithm.name(),
+                    NativeJson.parse(mapping.config).path("v").path("algorithm").asText());
+            if (previous != null) assertFalse(java.util.Arrays.equals(previous, mapping.config));
+            previous = mapping.config;
         }
     }
 

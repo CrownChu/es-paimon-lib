@@ -81,15 +81,17 @@ final class NativeMapping {
     private static Map<String, Object> physical(FieldIndexConfig field) {
         switch (field.indexType()) {
             case VECTOR:
-                if (field.algorithm() != VectorAlgorithm.HNSW)
+                if (field.algorithm() != VectorAlgorithm.HNSW
+                        && field.algorithm() != VectorAlgorithm.INT8_HNSW
+                        && field.algorithm() != VectorAlgorithm.DISKBBQ)
                     throw unsupported(
-                            "Only float HNSW is enabled by this native ABI; other algorithms retain"
-                                    + " their explicit identity");
+                            "Native vector support requires HNSW, INT8_HNSW or DISKBBQ; other"
+                                + " algorithms retain their explicit identity");
                 if (field.dimension() <= 0 || field.dimension() > 1024)
-                    throw unsupported("Native HNSW supports 1..1024 dimensions");
+                    throw unsupported("Native vector fields support 1..1024 dimensions");
                 if (!field.algorithmParams().isEmpty())
                     throw unsupported(
-                            "Native HNSW tuning parameters require independent compatibility"
+                            "Native vector tuning parameters require independent compatibility"
                                     + " validation");
                 return NativeJson.object(
                         "dims",
@@ -97,7 +99,13 @@ final class NativeMapping {
                         "index",
                         true,
                         "index_options",
-                        NativeJson.object("type", "hnsw"),
+                        NativeJson.object(
+                                "type",
+                                field.algorithm() == VectorAlgorithm.INT8_HNSW
+                                        ? "int8_hnsw"
+                                        : field.algorithm() == VectorAlgorithm.DISKBBQ
+                                                ? "bbq_disk"
+                                                : "hnsw"),
                         "similarity",
                         metric(field.metric()),
                         "type",

@@ -28,8 +28,12 @@ Use `org.elasticsearch.eslib.nativeindex.NativeESIndexBuilder` and
 `NativeESIndexSearcher` explicitly. They implement the original public APIs.
 
 The candidate translates scalar integer/long/float/double, keyword, epoch-millis
-date, text and float HNSW fields to the existing native writer/query ABI. HNSW
-dimensions are limited to 1–1024. Null rows and holes occupy dense document slots;
+date, text, float HNSW, INT8 HNSW and DiskBBQ fields to the native writer/query ABI.
+Vector dimensions are limited to 1–1024. INT8 HNSW retains its quantized graph and
+raw FLOAT32 vectors. DiskBBQ uses the ES940 v2 IVF format with one-bit documents,
+four-bit queries and the default clustering parameters; its native build must
+enable `--define=native_disk_bbq=true`. Each algorithm keeps its own mapping and
+archive identity. Null rows and holes occupy dense document slots;
 `finishDocument` allows bounded native batches for rows supplied in order.
 
 IK smart and max-word mappings use elasticpp's existing IK implementation.
@@ -55,7 +59,7 @@ that descriptor and are not accepted by this candidate.
 
 The following limits remain explicit:
 
-- INT8_HNSW, DiskBBQ, Proxima's `VectorAlgorithm.NATIVE` and custom HNSW parameters
+- Proxima's `VectorAlgorithm.NATIVE` and custom vector algorithm parameters
   are rejected. The new backend's float HNSW uses the existing
   `VectorAlgorithm.HNSW` enum value.
 - GEO filters, fuzzy/regexp/wildcard filters and nonzero match fuzziness are rejected.
@@ -99,9 +103,23 @@ JAVA_HOME=/path/to/jdk-21 ./gradlew \
 The integration tests call the real C++ writer and reader. They independently
 run Java Lucene `CheckIndex`, check every native row document value, exercise
 null holes and long values above 2^53, and compare vector results and scores with
-squared-L2 arithmetic. An additional IK test checks smart/max-word token sets
+squared-L2 arithmetic. Quantized-vector cases check the physical INT8 HNSW and
+DiskBBQ codec identities, sparse rows, archive reopening and prefilters. The IK
+test checks smart/max-word token sets
 with an independent Java Lucene reader and executes native queries after archive
 reopening. Missing native assets fail the tests rather than skip them.
+
+Independent C++ tests also export real INT8/DiskBBQ/IK index files for Java
+Lucene 10.4 checks. These validate the codec and analyzer implementations, while
+the integration task above qualifies the Java/JNA/runtime/archive boundary.
+
+The existing standalone Java SOAR compatibility helper is corrected to use the
+loss documented by `ClusteringFloatVectorValues`: candidate squared distance
+plus the nonnegative orthogonality penalty. Its bulk helper receives four
+candidate centroids and one shared primary residual. The previous subtraction
+and inconsistent bulk arguments fail the added hand-calculated regression
+cases. Rebuilding DiskBBQ indexes may therefore change their secondary cluster
+assignments; the on-disk format and existing-index read contract remain the same.
 
 ## Publication order
 

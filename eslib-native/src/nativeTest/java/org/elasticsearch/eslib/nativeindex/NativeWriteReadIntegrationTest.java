@@ -194,6 +194,85 @@ class NativeWriteReadIntegrationTest {
     }
 
     @Test
+    void nativeInt8WritesQuantizedHnswAndSearchesAnArchivedSparseIndex() throws Exception {
+        quantizedNativeWriteRead(
+                VectorAlgorithm.INT8_HNSW, "Lucene104HnswBinaryQuantizedVectorsFormat");
+    }
+
+    @Test
+    void nativeDiskBbqWritesIVFAndSearchesAnArchivedSparseIndex() throws Exception {
+        quantizedNativeWriteRead(VectorAlgorithm.DISKBBQ, "PaimonES940DiskBBQVectorsFormat");
+    }
+
+    private static void quantizedNativeWriteRead(VectorAlgorithm algorithm, String format)
+            throws Exception {
+        final int rows = 1703;
+        final int dimension = 33;
+        FieldIndexConfig field =
+                FieldIndexConfig.builder("vector", FieldIndexConfig.IndexType.VECTOR)
+                        .algorithm(algorithm)
+                        .dimension(dimension)
+                        .metric("l2")
+                        .build();
+        Map<String, FieldIndexConfig> fields = Collections.singletonMap("vector", field);
+        Path output;
+        try (NativeESIndexBuilder builder = new NativeESIndexBuilder(fields)) {
+            for (int row = 0; row < rows; row++) {
+                if (row % 7 == 0) builder.addNullDoc(row);
+                else builder.addVector("vector", row, quantizedVector(row, dimension));
+                builder.finishDocument(row);
+            }
+            builder.build();
+            output = builder.getOutputDir();
+        }
+        checkJavaLucene(output, rows, algorithm == VectorAlgorithm.DISKBBQ);
+        try (FSDirectory directory = FSDirectory.open(output);
+                DirectoryReader reader = DirectoryReader.open(directory)) {
+            int count = 0;
+            for (var leaf : reader.leaves()) {
+                var info = leaf.reader().getFieldInfos().fieldInfo("vector");
+                assertEquals(format, info.getAttribute("PerFieldKnnVectorsFormat.format"));
+                count += leaf.reader().getFloatVectorValues("vector").size();
+            }
+            assertEquals(rows - (rows + 6) / 7, count);
+        }
+        Archive archive = new Archive(output);
+        try (NativeESIndexSearcher searcher = new NativeESIndexSearcher()) {
+            searcher.load(archive, archive.offsets, fields);
+            long[] present = searcher.filter("vector", IndexFilter.exists());
+            long[] missing = searcher.filter("vector", IndexFilter.notExists());
+            assertEquals(rows - (rows + 6) / 7, present.length);
+            assertEquals((rows + 6) / 7, missing.length);
+            for (long row : missing) assertEquals(0, row % 7);
+            SearchResult result =
+                    searcher.vectorSearch("vector", quantizedVector(52, dimension), 10, null);
+            assertTrue(result.count > 0);
+            assertEquals(52, result.ids[0]);
+            assertEquals(
+                    1f, result.scores[0], algorithm == VectorAlgorithm.INT8_HNSW ? 0.005f : 0.15f);
+            SearchResult filtered =
+                    searcher.vectorSearch(
+                            "vector",
+                            quantizedVector(52, dimension),
+                            10,
+                            new long[] {7, 49, 52, 53, 54, 52});
+            assertEquals(3, filtered.count);
+            long[] ids = filtered.ids.clone();
+            Arrays.sort(ids);
+            assertArrayEquals(new long[] {52, 53, 54}, ids);
+            for (float score : filtered.scores) assertTrue(Float.isFinite(score));
+        }
+        assertTrue(archive.closed);
+    }
+
+    private static float[] quantizedVector(int row, int dimension) {
+        float[] vector = new float[dimension];
+        for (int d = 0; d < dimension; d++)
+            vector[d] = (float) ((row * (d + 7) + d * d + row / 127) % 251 - 125) / 64f;
+        return vector;
+    }
+
+    @Test
     void nativeEmptyIndexIsARealSealedAndReadableCommit() throws Exception {
         Map<String, FieldIndexConfig> fields =
                 Collections.singletonMap(
@@ -235,8 +314,16 @@ class NativeWriteReadIntegrationTest {
     }
 
     private static void checkJavaLucene(Path output, int expected) throws Exception {
+        checkJavaLucene(output, expected, false);
+    }
+
+    private static void checkJavaLucene(Path output, int expected, boolean diskBbq) throws Exception {
         try (FSDirectory directory = FSDirectory.open(output);
                 CheckIndex checker = new CheckIndex(directory)) {
+            // The standalone Lucene 10 DiskBBQ SPI supports build/merge only.
+            // Level 3 calls its intentionally unsupported Java search method;
+            // real vector queries are checked through C++ in this test class.
+            checker.setLevel(diskBbq ? 1 : 3);
             assertTrue(checker.checkIndex().clean, "Independent Java Lucene CheckIndex failed");
         }
         try (FSDirectory directory = FSDirectory.open(output);
@@ -245,6 +332,17 @@ class NativeWriteReadIntegrationTest {
             assertEquals(expected, reader.numDocs());
             assertFalse(reader.hasDeletions());
             for (LeafReaderContext leaf : reader.leaves()) {
+                if (diskBbq) {
+                    var segment = (org.apache.lucene.index.CodecReader) leaf.reader();
+                    CheckIndex.testLiveDocs(segment, null, true);
+                    CheckIndex.testFieldInfos(segment, null, true);
+                    CheckIndex.testFieldNorms(segment, null, true);
+                    assertNull(CheckIndex.testPostings(segment, null).error);
+                    CheckIndex.testStoredFields(segment, null, true);
+                    CheckIndex.testTermVectors(segment, null, true, 3, false);
+                    CheckIndex.testDocValues(segment, null, true);
+                    CheckIndex.testPoints(segment, null, true);
+                }
                 NumericDocValues rows = leaf.reader().getNumericDocValues("__native_rowid");
                 for (int doc = 0; doc < leaf.reader().maxDoc(); doc++) {
                     assertNotNull(rows);
