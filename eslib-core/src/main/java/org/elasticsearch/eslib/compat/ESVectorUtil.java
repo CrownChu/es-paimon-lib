@@ -115,27 +115,24 @@ public final class ESVectorUtil {
         for (int i = 0; i < vector.length; i++) {
             dotProduct += (vector[i] - centroid[i]) * diffs[i];
         }
-        float diffNormSq = 0f;
-        for (float d : diffs) {
-            diffNormSq += d * d;
-        }
-        float diffNorm = (float) Math.sqrt(diffNormSq);
-        float projection = (diffNorm > 0) ? (dotProduct / diffNorm) : 0f;
-        return vectorCentroidDist - soarLambda * projection * projection;
+        // ClusteringFloatVectorValues' SOAR loss is the candidate residual's
+        // squared length plus its squared projection onto the primary residual.
+        float penalty = vectorCentroidDist > 0 ? soarLambda * dotProduct * dotProduct / vectorCentroidDist : 0f;
+        return squareDistance(vector, centroid) + penalty;
     }
 
     public static void soarDistanceBulk(
         float[] vector,
-        float[] centroid,
-        float[] d0, float[] d1, float[] d2, float[] d3,
+        float[] centroid0, float[] centroid1, float[] centroid2, float[] centroid3,
+        float[] diffs,
         float soarLambda,
         float vectorCentroidDist,
         float[] results
     ) {
-        results[0] = soarDistance(vector, centroid, d0, soarLambda, vectorCentroidDist);
-        results[1] = soarDistance(vector, centroid, d1, soarLambda, vectorCentroidDist);
-        results[2] = soarDistance(vector, centroid, d2, soarLambda, vectorCentroidDist);
-        results[3] = soarDistance(vector, centroid, d3, soarLambda, vectorCentroidDist);
+        results[0] = soarDistance(vector, centroid0, diffs, soarLambda, vectorCentroidDist);
+        results[1] = soarDistance(vector, centroid1, diffs, soarLambda, vectorCentroidDist);
+        results[2] = soarDistance(vector, centroid2, diffs, soarLambda, vectorCentroidDist);
+        results[3] = soarDistance(vector, centroid3, diffs, soarLambda, vectorCentroidDist);
     }
 
     public static void transposeHalfByte(int[] input, byte[] output) {
