@@ -93,6 +93,7 @@ python3 tools/prepare_native_bundle.py \
   --cpu-isa x86-64-v3 \
   --library /absolute/artifacts/libelasticpp.so \
   --dependency /absolute/artifacts/libdadi.so \
+  --dependency /absolute/artifacts/libgomp.so.1 \
   --output /absolute/new-native-bundle
 
 JAVA_HOME=/path/to/jdk-21 ./gradlew \

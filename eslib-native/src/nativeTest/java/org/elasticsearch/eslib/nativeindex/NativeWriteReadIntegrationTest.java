@@ -3,7 +3,11 @@ package org.elasticsearch.eslib.nativeindex;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import org.apache.lucene.codecs.KnnVectorsReader;
+import org.apache.lucene.codecs.lucene104.Lucene104ScalarQuantizedVectorsReader;
+import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
 import org.apache.lucene.index.CheckIndex;
+import org.apache.lucene.index.CodecReader;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NumericDocValues;
@@ -248,8 +252,11 @@ class NativeWriteReadIntegrationTest {
                     searcher.vectorSearch("vector", quantizedVector(52, dimension), 10, null);
             assertTrue(result.count > 0);
             assertEquals(52, result.ids[0]);
-            assertEquals(
-                    1f, result.scores[0], algorithm == VectorAlgorithm.INT8_HNSW ? 0.005f : 0.15f);
+            if (algorithm == VectorAlgorithm.INT8_HNSW) {
+                assertJavaScalarQuantizedScores(output, quantizedVector(52, dimension), result);
+            } else {
+                assertEquals(1f, result.scores[0], 0.15f);
+            }
             SearchResult filtered =
                     searcher.vectorSearch(
                             "vector",
@@ -263,6 +270,41 @@ class NativeWriteReadIntegrationTest {
             for (float score : filtered.scores) assertTrue(Float.isFinite(score));
         }
         assertTrue(archive.closed);
+    }
+
+    private static void assertJavaScalarQuantizedScores(
+            Path output, float[] query, SearchResult actual) throws Exception {
+        Map<Long, Float> expected = new LinkedHashMap<>();
+        try (FSDirectory directory = FSDirectory.open(output);
+                DirectoryReader reader = DirectoryReader.open(directory)) {
+            for (var leaf : reader.leaves()) {
+                KnnVectorsReader graph =
+                        ((PerFieldKnnVectorsFormat.FieldsReader)
+                                        ((CodecReader) leaf.reader()).getVectorReader())
+                                .getFieldReader("vector");
+                // Locate the original Lucene scalar reader; its unchanged scorer,
+                // rather than the raw-vector self-score, is the quantized oracle.
+                var flat = graph.getClass().getDeclaredField("flatVectorsReader");
+                flat.setAccessible(true);
+                var scalar = (Lucene104ScalarQuantizedVectorsReader) flat.get(graph);
+                var scorer = scalar.getRandomVectorScorer("vector", query);
+                NumericDocValues rows = leaf.reader().getNumericDocValues("__native_rowid");
+                assertNotNull(rows);
+                for (int ord = 0; ord < scalar.getFloatVectorValues("vector").size(); ord++) {
+                    assertTrue(rows.advanceExact(scorer.ordToDoc(ord)));
+                    expected.put(rows.longValue() ^ Long.MIN_VALUE, scorer.score(ord));
+                }
+            }
+        }
+        for (int hit = 0; hit < actual.count; hit++) {
+            Float score = expected.get(actual.ids[hit]);
+            assertNotNull(score, "Native result references an unknown vector row");
+            assertEquals(
+                    score.floatValue(),
+                    actual.scores[hit],
+                    1e-4f,
+                    "Native INT8 score differs from the original Lucene scorer");
+        }
     }
 
     private static float[] quantizedVector(int row, int dimension) {
