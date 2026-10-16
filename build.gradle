@@ -12,7 +12,7 @@ if (!(luceneProfile in ['9', '10'])) {
 
 allprojects {
     group = 'io.github.paimon.eslib'
-    version = findProperty('releaseVersion') ?: '1.1.0-native.1'
+    version = findProperty('releaseVersion') ?: '1.1.0-native.2'
 
     repositories {
         mavenCentral()

@@ -46,24 +46,41 @@ public final class NativeESIndexSearcher implements ESIndexSearcher {
             Map<String, long[]> offsets,
             Map<String, FieldIndexConfig> fields)
             throws IOException {
+        loadInternal(provider, offsets, fields, null);
+    }
+
+    /** Opens caller-decoded PES1 files with their original native identity and absolute row span. */
+    public void loadSealedArchive(
+            ArchiveDataProvider provider, Map<String, long[]> offsets,
+            Map<String, FieldIndexConfig> physicalFields, NativeArchiveMetadata metadata)
+            throws IOException {
+        if (metadata == null) throw new IllegalArgumentException("Missing sealed Paimon metadata");
+        loadInternal(provider, offsets, physicalFields, metadata);
+    }
+
+    private void loadInternal(ArchiveDataProvider provider, Map<String, long[]> offsets,
+            Map<String, FieldIndexConfig> fields, NativeArchiveMetadata external) throws IOException {
         if (closed || loaded || this.provider != null)
             throw new IllegalStateException("Native searcher already owns an archive");
         if (provider == null || offsets == null || offsets.size() > 100001)
             throw new IllegalArgumentException("Missing or oversized native archive");
         this.provider = provider;
         try {
-            mapping = new NativeMapping(fields);
-            long[] metadata = range(offsets.get(NativeIndexManifest.NAME));
-            NativeClient.require(
-                    metadata[1] <= NativeIndexManifest.MAX_BYTES,
-                    "Native index metadata exceeds its limit");
-            manifest = NativeIndexManifest.decode(exact(metadata[0], Math.toIntExact(metadata[1])));
-            NativeClient.require(
-                    manifest.configSha256.equals(NativeJson.hex(NativeJson.digest(mapping.config)))
-                            && Arrays.equals(manifest.mapping, mapping.mapping),
-                    "Native archive field mapping differs");
+            mapping = external == null ? new NativeMapping(fields) : NativeMapping.physicalQueryFields(fields);
+            if (external == null) {
+                long[] metadata = range(offsets.get(NativeIndexManifest.NAME));
+                NativeClient.require(metadata[1] <= NativeIndexManifest.MAX_BYTES,
+                        "Native index metadata exceeds its limit");
+                manifest = NativeIndexManifest.decode(exact(metadata[0], Math.toIntExact(metadata[1])));
+                NativeClient.require(
+                        manifest.configSha256.equals(NativeJson.hex(NativeJson.digest(mapping.config)))
+                                && Arrays.equals(manifest.mapping, mapping.mapping),
+                        "Native archive field mapping differs");
+            } else {
+                manifest = external.manifest(mapping);
+            }
             Set<String> expected = new HashSet<>(manifest.files.keySet());
-            expected.add(NativeIndexManifest.NAME);
+            if (external == null) expected.add(NativeIndexManifest.NAME);
             NativeClient.require(
                     expected.equals(offsets.keySet()),
                     "Native archive file names differ from its sealed manifest");
@@ -170,6 +187,8 @@ public final class NativeESIndexSearcher implements ESIndexSearcher {
                         query);
         if (docOrder) source.put("sort", java.util.Collections.singletonList("_doc"));
         SearchResult result = client.query(handle, NativeJson.encode(source), limit, docOrder);
+        // V1 returns Lucene document positions, already relative to the sealed shard.
+        // In contrast, an _id prefilter below addresses the original absolute U64 IDs.
         Set<Long> unique = new HashSet<>();
         for (long row : result.ids)
             NativeClient.require(
@@ -235,7 +254,7 @@ public final class NativeESIndexSearcher implements ESIndexSearcher {
         Map<String, Object> knn =
                 NativeJson.object(
                         "field",
-                        field,
+                        mapping.nativeName(field),
                         "query_vector",
                         query.clone(),
                         "k",
@@ -251,7 +270,7 @@ public final class NativeESIndexSearcher implements ESIndexSearcher {
                 // The original Java prefilter ignores out-of-range rows and
                 // uses a bit set, so duplicate candidates are idempotent.
                 if (row >= 0 && row < manifest.rows && allowedRows.add(row)) {
-                    ids.add(Long.toString(row));
+                    ids.add(Long.toString(Math.addExact(manifest.rowStart, row)));
                 }
             }
             if (ids.isEmpty()) return SearchResult.EMPTY;

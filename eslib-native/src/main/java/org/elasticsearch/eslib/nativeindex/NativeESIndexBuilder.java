@@ -72,6 +72,7 @@ public final class NativeESIndexBuilder implements ESIndexBuilder {
     }
 
     private void value(String field, long row, Object value) {
+        field = mapping.nativeName(field);
         Map<String, Object> document = document(row);
         if (document.containsKey(field))
             throw new IllegalArgumentException(

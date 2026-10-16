@@ -18,6 +18,9 @@ final class NativeIndexManifest {
     final long rows;
     final byte[] mapping;
     String directorySha256;
+    long snapshotId, schemaId, rowStart;
+    String partitionSha256, indexColumnsSha256;
+    boolean external;
     final Map<String, File> files = new LinkedHashMap<>();
 
     static final class File {
@@ -52,13 +55,19 @@ final class NativeIndexManifest {
         result.tableUuid = name;
         result.tableUuidLength = (int) name.size() - 1;
         result.rowCount = rows;
+        result.snapshotId = snapshotId;
+        result.schemaId = schemaId;
+        result.rowStart = rowStart;
         result.mappingSha256 = NativeJson.unhex(mappingSha256);
-        result.partitionSha256 = NativeJson.digest(new byte[0]);
-        result.indexColumnsSha256 = NativeJson.unhex(configSha256);
+        result.partitionSha256 = partitionSha256 == null
+                ? NativeJson.digest(new byte[0]) : NativeJson.unhex(partitionSha256);
+        result.indexColumnsSha256 = NativeJson.unhex(
+                indexColumnsSha256 == null ? configSha256 : indexColumnsSha256);
         return result;
     }
 
     byte[] encode() throws IOException {
+        if (external) throw new IOException("Paimon metadata must retain its original PES1 envelope");
         Map<String, Object> table = NativeJson.object();
         for (Map.Entry<String, File> file : files.entrySet())
             table.put(

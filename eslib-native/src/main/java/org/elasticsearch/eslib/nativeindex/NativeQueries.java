@@ -37,7 +37,7 @@ final class NativeQueries {
             return NativeJson.object(
                     "match",
                     NativeJson.object(
-                            match.field(),
+                            mapping.nativeName(match.field()),
                             NativeJson.object(
                                     "query",
                                     match.text(),
@@ -53,7 +53,7 @@ final class NativeQueries {
             return NativeJson.object(
                     "match_phrase",
                     NativeJson.object(
-                            phrase.field(),
+                            mapping.nativeName(phrase.field()),
                             NativeJson.object("query", phrase.text(), "slop", phrase.slop())));
         }
         if (spec instanceof FullTextQuerySpec.Bool) {
@@ -97,7 +97,7 @@ final class NativeQueries {
     }
 
     Object filter(String field, IndexFilter filter) {
-        mapping.field(field);
+        field = mapping.nativeName(field);
         if (filter == null) throw new IllegalArgumentException("Missing native filter");
         if (filter instanceof IndexFilter.ScalarFilter)
             return scalar(field, ((IndexFilter.ScalarFilter) filter).predicate());

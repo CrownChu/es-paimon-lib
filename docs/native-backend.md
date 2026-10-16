@@ -57,6 +57,40 @@ The native archive includes `.eslib-native-v1.json`, which the archive packer
 must retain together with all sealed index files. Existing Java archives lack
 that descriptor and are not accepted by this candidate.
 
+Logical names such as `title.keyword` are supported as independently supplied
+columns. The native writer maps dotted logical names to deterministic physical
+names and translates queries through the same mapping. It does not synthesize
+the complementary value: callers such as Paimon must supply both columns.
+
+### Importing an original Paimon sealed archive
+
+`NativeESIndexSearcher.loadSealedArchive(provider, offsets, physicalFields, metadata)`
+accepts caller-decoded PES1 file offsets and a `NativeArchiveMetadata` descriptor.
+The caller must first validate the original PES1 envelope and archive identity;
+the descriptor contains its original table identity, snapshot, schema, absolute
+row span, partition/column digests, canonical mapping, native commit/SO digest
+and sealed file table. This reader checks file ranges, lengths, hashes and the
+C++ sealed identity marker. It computes the directory commitment using the
+original C++ file-table algorithm; it does not rewrite PES1 into ESLib metadata.
+
+Pass the original physical names, such as `f0` and `f1.keyword`, as field configs
+in this mode. Supported scalar, text and vector physical settings must match;
+parent multi-fields and write-only numeric coercion do not change an existing
+field's read semantics. Other unqualified mapping differences are rejected.
+
+This API is for indexes written by Paimon's ordered dense-row writer. V1 queries
+return shard-relative Lucene document positions. KNN `_id` prefilters address
+the original absolute U64 IDs, so the adapter adds the preserved row start using
+integer arithmetic. It does not subtract that offset from V1 results. Arbitrary
+unordered or sparse document-to-row mappings are outside this contract.
+
+The original Paimon writer must use the same native bundle as this reader.
+This entry point imports sealed files; it does not implement the original V2
+query runtime, PEQ1/PQR1 envelopes, Spark/Ray orchestration or its distribution
+classifier. The reverse interoperability test probes ESLib's native files through
+Paimon's original V1 ABI; it does not claim a PES1/V2 reader can directly consume
+an ESLib envelope.
+
 The following limits remain explicit:
 
 - Proxima's `VectorAlgorithm.NATIVE` and custom vector algorithm parameters
@@ -110,6 +144,13 @@ test checks smart/max-word token sets
 with an independent Java Lucene reader and executes native queries after archive
 reopening. Missing native assets fail the tests rather than skip them.
 
+Additional real-native tests call pinned original Paimon V1 declarations and
+round-trip its PES1 codec, read that archive through ESLib, reject a foreign
+snapshot, and check the reverse native-directory probe. Independent Java Lucene
+doc values verify IDs above 2^53 without rounding. The reference commit, source
+hashes and test-only adaptations are recorded alongside those reference sources
+in `eslib-native/src/nativeTest/java/org/apache/paimon/elasticsearch/reference-provenance.json`.
+
 Independent C++ tests also export real INT8/DiskBBQ/IK index files for Java
 Lucene 10.4 checks. These validate the codec and analyzer implementations, while
 the integration task above qualifies the Java/JNA/runtime/archive boundary.
@@ -138,7 +179,7 @@ For example, staging the candidate requires a real native bundle:
 JAVA_HOME=/path/to/jdk-21 ./gradlew \
   verifyPublicationCoordinates \
   :eslib-api:publish :eslib-native-runtime:publish :eslib-native:publish \
-  -Plucene=10 -PreleaseVersion=1.1.0-native.1 \
+  -Plucene=10 -PreleaseVersion=1.1.0-native.2 \
   -PnativeBundleDir=/absolute/new-native-bundle \
   -PreleaseRepositoryDir=/absolute/staging/repository
 ```

@@ -13,6 +13,7 @@ import java.util.TreeMap;
 /** Compiles one explicit native capability set; never changes an algorithm silently. */
 final class NativeMapping {
     final Map<String, FieldIndexConfig> fields;
+    private final Map<String, String> nativeNames = new TreeMap<>(NativeJson.UTF8_ORDER);
     final byte[] mapping, config;
 
     NativeMapping(Map<String, FieldIndexConfig> source) throws IOException {
@@ -21,6 +22,15 @@ final class NativeMapping {
 
     NativeMapping(Map<String, FieldIndexConfig> source, NativeIkDictionary dictionary)
             throws IOException {
+        this(source, dictionary, false);
+    }
+
+    static NativeMapping physicalQueryFields(Map<String, FieldIndexConfig> source) throws IOException {
+        return new NativeMapping(source, NativeIkDictionary.selected(source), true);
+    }
+
+    private NativeMapping(Map<String, FieldIndexConfig> source, NativeIkDictionary dictionary,
+            boolean physicalQueryFields) throws IOException {
         if (source == null || source.isEmpty() || source.size() > 1024)
             throw new IllegalArgumentException("Native fields must contain 1..1024 entries");
         Map<String, FieldIndexConfig> selected = new TreeMap<>(NativeJson.UTF8_ORDER);
@@ -31,6 +41,11 @@ final class NativeMapping {
             configs.put("__native_ik_dictionary", dictionary.files);
         }
         for (Map.Entry<String, FieldIndexConfig> entry : source.entrySet()) {
+            if (entry.getKey() == null)
+                throw new IllegalArgumentException("Native field name is missing");
+            selected.put(entry.getKey(), entry.getValue());
+        }
+        for (Map.Entry<String, FieldIndexConfig> entry : selected.entrySet()) {
             String name = entry.getKey();
             FieldIndexConfig field = entry.getValue();
             if (name == null
@@ -38,15 +53,24 @@ final class NativeMapping {
                     || !name.equals(field.fieldName())
                     || name.isEmpty()
                     || name.startsWith("_")
-                    || name.indexOf('.') >= 0
                     || name.indexOf('\u0000') >= 0) {
                 throw new IllegalArgumentException(
-                        "Native field names must be unambiguous non-reserved top-level names");
+                        "Native field names must be nonempty and non-reserved");
             }
             NativeJson.utf8(name);
-            selected.put(name, field);
+            // Paimon writes complementary text/keyword columns under dotted logical names.
+            // Keep those names in the API/config but store them as independent physical fields.
+            String physicalName = name;
+            if (!physicalQueryFields && name.indexOf('.') >= 0) {
+                String base = "eslib_" + NativeJson.hex(NativeJson.digest(NativeJson.utf8(name)));
+                physicalName = base;
+                for (int suffix = 1; source.containsKey(physicalName)
+                        || nativeNames.containsValue(physicalName); suffix++)
+                    physicalName = base + "_" + suffix;
+            }
+            nativeNames.put(name, physicalName);
             Map<String, Object> physical = physical(field);
-            properties.put(name, physical);
+            properties.put(physicalName, physical);
             configs.put(
                     name,
                     NativeJson.object(
@@ -76,6 +100,11 @@ final class NativeMapping {
         config = NativeJson.encode(configs);
         if (mapping.length > 8 * 1024 * 1024)
             throw new IllegalArgumentException("Native mapping exceeds 8 MiB");
+    }
+
+    String nativeName(String logical) {
+        field(logical);
+        return nativeNames.get(logical);
     }
 
     private static Map<String, Object> physical(FieldIndexConfig field) {

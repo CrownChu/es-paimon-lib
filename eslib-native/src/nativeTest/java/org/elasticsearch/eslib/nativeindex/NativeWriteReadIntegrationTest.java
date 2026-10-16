@@ -39,6 +39,36 @@ import java.util.Map;
 /** Real C++ calls are mandatory. Missing native assets fail rather than skip these tests. */
 class NativeWriteReadIntegrationTest {
     @Test
+    void dottedLogicalMultiFieldsRetainIndependentPhysicalValues() throws Exception {
+        Map<String, FieldIndexConfig> fields = new LinkedHashMap<>();
+        fields.put("title", FieldIndexConfig.builder("title", FieldIndexConfig.IndexType.FULLTEXT).build());
+        fields.put("title.keyword", FieldIndexConfig.builder("title.keyword", FieldIndexConfig.IndexType.KEYWORD).build());
+        // A user field that collides with the first generated alias must remain independent.
+        String collision = "eslib_" + NativeJson.hex(NativeJson.digest(NativeJson.utf8("title.keyword")));
+        fields.put(collision, FieldIndexConfig.builder(collision, FieldIndexConfig.IndexType.KEYWORD).build());
+        Path output;
+        try (NativeESIndexBuilder builder = new NativeESIndexBuilder(fields)) {
+            builder.addTextField("title", 0, "Alpha Engine");
+            builder.addScalarField("title.keyword", 0, "Alpha Engine", ScalarFieldType.KEYWORD);
+            builder.addScalarField(collision, 0, "independent", ScalarFieldType.KEYWORD);
+            builder.finishDocument(0);
+            builder.addNullDoc(1);
+            builder.finishDocument(1);
+            builder.build();
+            output = builder.getOutputDir();
+        }
+        Archive archive = new Archive(output);
+        try (NativeESIndexSearcher searcher = new NativeESIndexSearcher()) {
+            searcher.load(archive, archive.offsets, fields);
+            assertArrayEquals(new long[] {0}, searcher.fullTextSearch("title", "alpha", 10).ids);
+            assertArrayEquals(new long[] {0}, searcher.scalarFilter("title.keyword", ScalarPredicate.eq("Alpha Engine")));
+            assertArrayEquals(new long[0], searcher.scalarFilter("title.keyword", ScalarPredicate.eq("alpha engine")));
+            assertArrayEquals(new long[] {0}, searcher.scalarFilter(collision, ScalarPredicate.eq("independent")));
+            assertArrayEquals(new long[] {1}, searcher.filter("title.keyword", IndexFilter.notExists()));
+        }
+    }
+
+    @Test
     void nativeIkSmartAndMaxWordPreserveDictionaryIdentityAndTokenModes() throws Exception {
         // The test-only dictionary contains one long lexeme and its three
         // overlapping components. IK smart keeps the longest lexeme; max-word

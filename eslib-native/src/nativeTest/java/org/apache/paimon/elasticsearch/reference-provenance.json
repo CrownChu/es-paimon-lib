@@ -1,0 +1,18 @@
+{
+  "repository": "https://code.alibaba-inc.com/weizijun.wzj/paimon",
+  "commit": "d9239a3672eb28180f40644b6129501841ff32a7",
+  "files": {
+    "NativeElasticppLibrary.java": "7ab5787f5f76e6fc92e7ad9840666e8767a3ed2f0a3ef9d1e7cafe96e6be4183",
+    "PaimonElasticsearchFileMeta.java": "32aaaa43af489935e62f5be061db18d5f566f8bc9824086e1ef2cabf4fc5eaf8",
+    "Crc32c.java": "8597a838e11059c22647a8cfdff3b3f72bbbe70033cbb70e6353cf7a1a0a5008",
+    "PaimonElasticsearchMappingBuilder.java": "987ca26f4cf7ee22ff4389fb0b41662a28414029acbf1b58af7ff2a37bfca1e1"
+  },
+  "adaptations": [
+    "Only required V1 structures and function declarations retained; ABI members/signatures unchanged.",
+    "PES1 exception types changed to IllegalArgumentException; no Paimon exception context dependency.",
+    "Mapping digest helper uses the same JDK SHA-256 directly.",
+    "Crc32c copied unchanged.",
+    "Fixture mapping follows PaimonElasticsearchMappingBuilder.fieldConfig for BIGINT, STRING with keyword multi-field, and FLOAT32 HNSW. No Paimon Java runtime is replaced."
+  ],
+  "scope": "Test oracle only; no V2 query/runtime implementation or Spark/Ray distributed acceptance."
+}
