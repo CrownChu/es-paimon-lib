@@ -12,10 +12,16 @@ release repository.
 
 | Module | Purpose |
 |---|---|
-| `eslib-core` | Public APIs, index builders/searchers, archive IO, HNSW, DiskBBQ, full-text, and scalar indexes |
+| `eslib-api` | Backend-neutral public interfaces and model classes |
+| `eslib-core` | Java index builders/searchers, archive IO, HNSW, DiskBBQ, full-text, and scalar indexes |
 | `eslib-simdvec` | Standalone fallback implementation for Elasticsearch SIMD-vector APIs used by DiskBBQ |
+| `eslib-native` | Explicit C++ writer/reader binding, without a Java Lucene runtime dependency |
+| `eslib-native-runtime` | Verified Linux x86_64 C++ runtime package |
 
-The former `eslib-api` module has been merged into `eslib-core`.
+The API is extracted from the 1.0.7 core without changing its packages or type
+signatures. See [the native candidate contract](docs/native-backend.md) for
+supported operations, current limits, real native verification and publication
+order. The native candidate is not yet a published release.
 
 ## Build
 
@@ -33,8 +39,10 @@ To write Maven artifacts to a local directory, publish each Lucene line separate
 IDs include the Lucene major version, so both lines can coexist in the same Maven repository:
 
 ```shell
-./gradlew publish -Plucene=9 -PreleaseRepositoryDir=/absolute/output/path
-JAVA_HOME=/path/to/jdk-21 ./gradlew publish -Plucene=10 -PreleaseRepositoryDir=/absolute/output/path
+./gradlew :eslib-api:publish :eslib-core:publish :eslib-simdvec:publish \
+  -Plucene=9 -PreleaseRepositoryDir=/absolute/output/path
+JAVA_HOME=/path/to/jdk-21 ./gradlew :eslib-core:publish :eslib-simdvec:publish \
+  -Plucene=10 -PreleaseRepositoryDir=/absolute/output/path
 ```
 
 ## Maven artifacts

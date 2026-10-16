@@ -11,3 +11,7 @@ This product includes software developed by The Apache Software Foundation
 
 Apache Lucene
 Copyright 2014 The Apache Software Foundation
+
+The native archive interoperability tests include Paimon reference sources
+under the Apache License 2.0. Their pinned source identities and test-only
+adaptations are recorded in reference-provenance.json beside those sources.

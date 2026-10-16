@@ -42,6 +42,8 @@ sourceSets {
 
 dependencies {
 
+    api project(':eslib-api')
+
     // Lucene - version depends on profile
     implementation "org.apache.lucene:lucene-core:${luceneVersionOverride}"
     implementation "org.apache.lucene:lucene-analysis-common:${luceneVersionOverride}"

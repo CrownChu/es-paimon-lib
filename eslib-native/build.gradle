@@ -1,0 +1,71 @@
+dependencies {
+    api project(':eslib-api')
+    implementation 'net.java.dev.jna:jna:5.14.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    runtimeOnly project(':eslib-native-runtime')
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.9.3'
+}
+
+sourceSets {
+    nativeIntegrationTest {
+        java.srcDir 'src/nativeTest/java'
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+configurations {
+    nativeIntegrationTestImplementation.extendsFrom testImplementation, implementation, api
+    nativeIntegrationTestRuntimeOnly.extendsFrom runtimeOnly
+    [nativeIntegrationTestCompileClasspath, nativeIntegrationTestRuntimeClasspath].each {
+        it.attributes.attribute(org.gradle.api.attributes.java.TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 21)
+    }
+}
+dependencies {
+    nativeIntegrationTestImplementation project(':eslib-core')
+    nativeIntegrationTestImplementation 'org.apache.lucene:lucene-core:10.4.0'
+}
+tasks.named('compileNativeIntegrationTestJava') {
+    sourceCompatibility = JavaVersion.VERSION_21.toString()
+    targetCompatibility = JavaVersion.VERSION_21.toString()
+    doFirst {
+        if ((rootProject.findProperty('lucene') ?: '9').toString() != '10') {
+            throw new GradleException('Native Lucene 10.4 oracle checks require -Plucene=10 and JDK 21+')
+        }
+    }
+}
+
+// Unit tests exercise protocol translation and ABI ownership without a native
+// binary. The real integration task uses the complete published runtime.
+configurations {
+    unitRuntimeClasspath {
+        canBeConsumed = false
+        canBeResolved = true
+        extendsFrom implementation, api, testImplementation
+        attributes {
+            attribute Usage.USAGE_ATTRIBUTE, objects.named(Usage, Usage.JAVA_RUNTIME)
+        }
+    }
+}
+tasks.named('test') {
+    classpath = sourceSets.test.output + sourceSets.main.output + configurations.unitRuntimeClasspath
+    exclude '**/*NativeIntegrationTest.class'
+}
+
+tasks.register('nativeIntegrationTest', Test) {
+    group = 'verification'
+    description = 'Runs real C++ writer/reader checks with the verified native platform bundle.'
+    testClassesDirs = sourceSets.nativeIntegrationTest.output.classesDirs
+    classpath = sourceSets.nativeIntegrationTest.runtimeClasspath
+    useJUnitPlatform()
+    environment 'ES_PATH_CONF', file('src/nativeTest/resources/ik-config').absolutePath
+    inputs.dir file('src/nativeTest/resources/ik-config')
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.withType(PublishToMavenRepository).configureEach {
+    dependsOn tasks.named('test'), tasks.named('nativeIntegrationTest')
+}
+tasks.withType(PublishToMavenLocal).configureEach {
+    dependsOn tasks.named('test'), tasks.named('nativeIntegrationTest')
+}

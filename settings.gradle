@@ -2,3 +2,6 @@ rootProject.name = 'es-paimon-lib'
 
 include 'eslib-core'
 include 'eslib-simdvec'
+include 'eslib-api'
+include 'eslib-native'
+include 'eslib-native-runtime'

@@ -18,3 +18,5 @@ Thumbs.db
 # Build output
 out/
 target/
+__pycache__/
+*.pyc
